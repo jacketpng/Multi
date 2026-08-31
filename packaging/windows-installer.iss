@@ -42,6 +42,7 @@ ArchitecturesAllowed={#MultiArch}compatible
 ArchitecturesInstallIn64BitMode={#MultiArch}compatible
 UninstallDisplayIcon={app}\{#MultiExe}
 OutputDir=.
+LicenseFile=..\LICENSE
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

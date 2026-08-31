@@ -61,7 +61,8 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -a "$BUNDLE" "$STAGE/$NAME-$VERSION"
 tar -czf "$TOP/SOURCES/$NAME-$VERSION-linux-$ARCH.tar.gz" -C "$STAGE" "$NAME-$VERSION"
-install -m 0644 "$PKG_DIR/dev.multi.Multi.desktop" "$PKG_DIR/$NAME.svg" "$TOP/SOURCES/"
+install -m 0644 "$PKG_DIR/dev.multi.Multi.desktop" "$PKG_DIR/$NAME.svg" \
+    "$PROJECT_DIR/LICENSE" "$TOP/SOURCES/"
 
 echo "==> rpmbuild"
 # rpm on Debian-family systems defaults _libdir to /usr/lib, which would

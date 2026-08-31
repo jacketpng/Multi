@@ -258,3 +258,15 @@ Two things to know before the first run:
 - `lib/services/convert_planner.dart` — container/codec matrix and ffmpeg
   command builder
 - `flutter test` runs unit tests for the router, planner, and presets.
+
+## License
+
+Multi is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License, version 3 or later**. See
+[LICENSE](LICENSE).
+
+The five media tools are *not* bundled — Multi downloads them at runtime
+into your own data directory and runs them as separate processes, so
+they keep their own licences (yt-dlp: Unlicense; gallery-dl: GPL-2.0;
+aria2: GPL-2.0-or-later; FFmpeg: LGPL/GPL depending on build;
+ImageMagick: its own Apache-style licence).

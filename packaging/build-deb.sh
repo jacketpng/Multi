@@ -65,6 +65,8 @@ ln -sr "$ROOT/usr/lib/$NAME/$NAME" "$ROOT/usr/bin/$NAME"
 install -m 0644 "$PKG_DIR/$APPID.desktop" "$ROOT/usr/share/applications/"
 install -m 0644 "$PKG_DIR/$NAME.svg" \
     "$ROOT/usr/share/icons/hicolor/scalable/apps/$APPID.svg"
+install -d "$ROOT/usr/share/doc/$NAME"
+install -m 0644 "$PROJECT_DIR/LICENSE" "$ROOT/usr/share/doc/$NAME/copyright"
 
 INSTALLED_KB="$(du -ks "$ROOT/usr" | cut -f1)"
 cat > "$ROOT/DEBIAN/control" <<EOF
@@ -90,6 +92,9 @@ Description: Media multi-tool GUI for yt-dlp, gallery-dl, aria2 and FFmpeg
  yt-dlp, gallery-dl, aria2, FFmpeg and ImageMagick are downloaded and
  kept up to date automatically in the user's own data directory, so they
  are not packaging dependencies.
+ .
+ Multi is free software under the GNU General Public License version 3
+ or later. See /usr/share/doc/multi/copyright.
 EOF
 
 dpkg-deb --build --root-owner-group "$ROOT" >/dev/null

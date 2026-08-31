@@ -1,0 +1,101 @@
+name: macOS tools
+
+# Builds relocatable macOS binaries for FFmpeg, aria2 and ImageMagick,
+# and publishes them to the "macos-tools" release for Multi to download.
+#
+# Run it by hand from the Actions tab; these only need rebuilding when
+# the upstream tools move on, not on every app release.
+#
+# Why this exists: nobody publishes portable macOS builds of aria2 or
+# ImageMagick, and the only FFmpeg ones are Intel-only. Without this,
+# macOS users have to install those by hand, which defeats the point.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the macos-tools release (otherwise just upload artifacts)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon
+            arch: arm64
+          - runner: macos-13   # Intel
+            arch: x86_64
+        tool: [ffmpeg, aria2, imagemagick]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.tool }} (${{ matrix.arch }})
+        run: |
+          ./packaging/macos-tools/build-macos-tool.sh \
+            "${{ matrix.tool }}" "$GITHUB_WORKSPACE/dist"
+
+      - name: Smoke-test the bundle away from Homebrew
+        run: |
+          set -x
+          WORK="$(mktemp -d)"
+          tar -C "$WORK" -xzf dist/${{ matrix.tool }}-macos-${{ matrix.arch }}.tar.gz
+          cat "$WORK/SOURCES.txt" | head -20
+          # Run with an empty PATH and no Homebrew prefix visible, which
+          # is the situation on a user's machine.
+          case "${{ matrix.tool }}" in
+            ffmpeg)      env -i "$WORK/bin/ffmpeg" -version | head -1
+                         env -i "$WORK/bin/ffprobe" -version | head -1 ;;
+            aria2)       env -i "$WORK/bin/aria2c" --version | head -1 ;;
+            imagemagick) env -i "$WORK/bin/magick" -version | head -1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.tool }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish to the macos-tools release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILES="$(find dist -name '*.tar.gz' | sort)"
+          [ -n "$FILES" ] || { echo "::error::nothing was built"; exit 1; }
+          echo "$FILES"
+          cat > notes.md <<'NOTES'
+          Relocatable macOS builds of FFmpeg, aria2 and ImageMagick that
+          Multi downloads on first launch. Not intended to be installed
+          by hand.
+
+          Each tarball contains `bin/` and `lib/`, with library paths
+          rewritten to `@executable_path/../lib` so it runs on a machine
+          with no Homebrew.
+
+          Every tarball includes `SOURCES.txt` recording the exact
+          upstream versions and every bundled library, which is where to
+          look for the corresponding source of these GPL binaries.
+          NOTES
+          # A rolling tag: the newest build always wins.
+          if gh release view macos-tools --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit macos-tools --repo "$GITHUB_REPOSITORY" \
+              --notes-file notes.md
+            gh release upload macos-tools --repo "$GITHUB_REPOSITORY" \
+              --clobber $FILES
+          else
+            gh release create macos-tools --repo "$GITHUB_REPOSITORY" \
+              --title "macOS tool builds" --notes-file notes.md $FILES
+          fi

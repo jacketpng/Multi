@@ -12,11 +12,12 @@ Version:        %{appversion}
 Release:        1%{?dist}
 Summary:        Media multi-tool GUI for yt-dlp, gallery-dl, aria2, FFmpeg, and ImageMagick
 
-License:        MIT
+License:        GPL-3.0-or-later
 URL:            https://github.com/jacketpng/Multi
 Source0:        %{name}-%{version}-linux-%{_arch}.tar.gz
 Source1:        %{appid}.desktop
 Source2:        %{name}.svg
+Source3:        LICENSE
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -80,11 +81,13 @@ ln -sr %{buildroot}%{_libdir}/%{name}/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm 0644 %{SOURCE1} %{buildroot}%{_datadir}/applications/%{appid}.desktop
 install -Dpm 0644 %{SOURCE2} \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
+cp -p %{SOURCE3} .
 
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/%{appid}.desktop
 
 %files
+%license LICENSE
 %{_bindir}/%{name}
 %{_libdir}/%{name}/
 %{_datadir}/applications/%{appid}.desktop

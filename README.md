@@ -222,15 +222,15 @@ fails, then builds:
 
 | Job | Runner | Produces |
 |---|---|---|
-| `linux` (x86_64) | `ubuntu-22.04` | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` |
-| `linux` (aarch64) | `ubuntu-22.04-arm` | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` |
 | `windows` (x64) | `windows-latest` | Inno Setup `-setup.exe` + portable `.zip` |
 | `windows` (arm64) | `windows-11-arm` | Inno Setup `-setup.exe` + portable `.zip` |
 | `macos` | `macos-14` | universal (arm64 + x86_64) `.dmg` |
 
-Linux builds run on Ubuntu 22.04 deliberately: glibc is forward
-compatible, so binaries built against an older glibc run on newer
-distributions but not the reverse.
+Linux packages are **not** built by CI — build them locally with the
+scripts above. They are quick to run and need no runner minutes.
+
+If one platform fails, the release still publishes whatever the others
+produced rather than losing the lot.
 
 The version comes from the tag, so `v1.2.3` builds `1.2.3` — no need to
 edit `pubspec.yaml` first. "Run workflow" in the Actions tab does a test
@@ -238,10 +238,10 @@ build that uploads artifacts without publishing a release.
 
 Two things to know before the first run:
 
-- **Arm runners.** `ubuntu-22.04-arm` and `windows-11-arm` are free for
-  public repositories; private repositories need a paid plan. Delete
-  those matrix entries if that applies. `fail-fast: false` means one
-  architecture failing does not cancel the others.
+- **Arm runners.** `windows-11-arm` is free for public repositories;
+  private repositories need a paid plan. Drop that matrix entry if it
+  does not apply to you — `fail-fast: false` plus the release job's
+  `always()` mean it failing costs only the arm64 installer.
 - **Signing.** The Windows and macOS builds are unsigned; signing needs
   certificates in repository secrets and is not set up here. macOS
   quarantines unsigned apps, so first launch needs right-click → Open.

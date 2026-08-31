@@ -55,73 +55,6 @@ jobs:
           fi
 
   # ---------------------------------------------------------------
-  # Linux: .deb, .rpm, .AppImage and a portable tarball, per arch.
-  # Built on the oldest supported Ubuntu because glibc is forward
-  # compatible: binaries built against an older glibc run on newer
-  # distributions, but not the other way round.
-  # ---------------------------------------------------------------
-  linux:
-    needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-22.04
-            arch: x86_64
-            bundle: x64
-          - runner: ubuntu-22.04-arm
-            arch: aarch64
-            bundle: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev \
-            libstdc++-12-dev patchelf desktop-file-utils \
-            rpm dpkg-dev file zsync
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-
-      - name: Set version from the tag
-        run: |
-          sed -i 's/^version: .*/version: ${{ needs.version.outputs.version }}/' pubspec.yaml
-          grep '^version:' pubspec.yaml
-
-      - name: Build
-        run: |
-          flutter pub get
-          flutter build linux --release
-          ls build/linux/${{ matrix.bundle }}/release/bundle/multi
-
-      - name: Package
-        run: |
-          set -x
-          V='${{ needs.version.outputs.version }}'
-          tar -C build/linux/${{ matrix.bundle }}/release \
-              -czf "multi-$V-linux-${{ matrix.arch }}.tar.gz" bundle
-          ./packaging/build-deb.sh --skip-build
-          ./packaging/build-rpm.sh --skip-build
-          ./packaging/build-appimage.sh --skip-build
-          cp "$HOME"/rpmbuild/RPMS/*/multi-*.rpm .
-          ls -lh multi*.deb multi-*.rpm multi-*.tar.gz Multi-*.AppImage
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.arch }}
-          path: |
-            multi*.deb
-            multi-*.rpm
-            multi-*.tar.gz
-            Multi-*.AppImage
-
-  # ---------------------------------------------------------------
   # Windows: an Inno Setup installer plus a portable zip, for x64 and
   # arm64. Flutter cannot cross-compile between Windows architectures,
   # so each is built on a matching runner.
@@ -239,9 +172,13 @@ jobs:
 
   release:
     # Only a real tag publishes; manual runs stop at the artifacts.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # always() so that one platform failing still publishes whatever the
+    # others produced, instead of losing the whole release.
+    if: |
+      always() && startsWith(github.ref, 'refs/tags/v')
+      && needs.version.result == 'success'
     runs-on: ubuntu-latest
-    needs: [version, linux, windows, macos]
+    needs: [version, windows, macos]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -251,17 +188,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          find dist -type f | sort
+          FILES="$(find dist -type f | sort)"
+          if [ -z "$FILES" ]; then
+            echo "::error::no artifacts were produced - nothing to release"
+            exit 1
+          fi
+          echo "$FILES"
           cat > notes.md <<'NOTES'
           | Platform | Download |
           |---|---|
-          | Debian / Ubuntu / Mint | `multi_*_amd64.deb`, `multi_*_arm64.deb` |
-          | Fedora / RHEL / openSUSE | `multi-*.x86_64.rpm`, `multi-*.aarch64.rpm` |
-          | Any Linux | `Multi-*.AppImage` — `chmod +x` and run |
-          | Linux (portable) | `multi-*-linux-*.tar.gz` — unpack, run `bundle/multi` |
           | Windows | `multi-*-windows-x64-setup.exe` / `-arm64-setup.exe` |
           | Windows (portable) | `multi-*-windows-*.zip` |
           | macOS (Intel + Apple Silicon) | `multi-*-macos-universal.dmg` |
+
+          Linux builds are not produced by CI; build them locally with
+          `packaging/build-rpm.sh`, `build-deb.sh` or `build-appimage.sh`.
 
           The Windows and macOS builds are unsigned. macOS quarantines
           unsigned apps: right-click and choose Open, or run
@@ -274,4 +215,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Multi $VERSION" \
             --notes-file notes.md \
-            $(find dist -type f | sort)
+            $FILES

@@ -274,8 +274,21 @@ jobs:
           Multi downloads yt-dlp, gallery-dl, aria2, FFmpeg and
           ImageMagick itself on first launch — nothing else to install.
           NOTES
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Multi $VERSION" \
-            --notes-file notes.md \
-            $FILES
+          # Idempotent: re-running a tag after fixing CI must update the
+          # existing release rather than failing with "already exists".
+          if gh release view "$GITHUB_REF_NAME" \
+               --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists - updating it"
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Multi $VERSION" \
+              --notes-file notes.md
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --clobber $FILES
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Multi $VERSION" \
+              --notes-file notes.md \
+              $FILES
+          fi

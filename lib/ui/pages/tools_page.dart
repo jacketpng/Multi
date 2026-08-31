@@ -177,13 +177,66 @@ class _ToolRow extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(spec.unavailableHint!,
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(fontFamily: 'monospace')),
+                    style: Theme.of(context).textTheme.bodySmall),
               ),
+            // Where no portable binary exists, offer to install it via
+            // Homebrew rather than sending the user to a terminal.
+            if (spec.brewFormula != null &&
+                (status.kind == ToolStatusKind.missing ||
+                    status.kind == ToolStatusKind.error))
+              _BrewButton(spec: spec),
           ],
         ),
+      ),
+    );
+  }
+}
+
+
+/// One-click Homebrew install for tools with no portable build.
+class _BrewButton extends StatefulWidget {
+  final ToolSpec spec;
+  const _BrewButton({required this.spec});
+
+  @override
+  State<_BrewButton> createState() => _BrewButtonState();
+}
+
+class _BrewButtonState extends State<_BrewButton> {
+  bool? _hasBrew;
+
+  @override
+  void initState() {
+    super.initState();
+    ToolManager.homebrewPath().then((p) {
+      if (mounted) setState(() => _hasBrew = p != null);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tm = context.read<ToolManager>();
+    final cs = Theme.of(context).colorScheme;
+    if (_hasBrew == null) return const SizedBox.shrink();
+    if (_hasBrew == false) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          'Install Homebrew from brew.sh, then Multi can install '
+          '${widget.spec.brewFormula} for you.',
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: cs.outline),
+        ),
+      );
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: () => tm.installWithHomebrew(widget.spec.id),
+        icon: const Icon(Icons.download_outlined, size: 18),
+        label: Text('Install ${widget.spec.brewFormula} with Homebrew'),
       ),
     );
   }

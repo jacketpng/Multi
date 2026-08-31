@@ -284,6 +284,10 @@ const _video = <CodecInfo>[
   ),
 ];
 
+// DTS is deliberately absent as an *encode* target: FFmpeg's only DTS
+// encoder ("dca") is experimental and refuses to run without -strict -2,
+// and its quality is poor. An existing DTS track is still copied, since
+// the container tables list dts among what MP4 and MKV can carry.
 const _audio = <CodecInfo>[
   CodecInfo(
     id: 'aac', label: 'AAC', kind: 'audio', rank: 1,
@@ -364,14 +368,6 @@ const _audio = <CodecInfo>[
         'Uncompressed audio at 24-bit depth, the usual studio recording format. Bigger than 16-bit PCM.',
     encoders: ['pcm_s24le'],
     lossless: true,
-  ),
-  CodecInfo(
-    id: 'dts', label: 'DTS', kind: 'audio', rank: 11,
-    shortDescription: 'cinema surround, receiver-friendly',
-    description:
-        'Surround format from DVD/Blu-ray, understood by most AV receivers. FFmpeg\'s encoder is basic but works.',
-    encoders: ['dca'],
-    defaultKbps: 768,
   ),
   CodecInfo(
     id: 'truehd', label: 'Dolby TrueHD', kind: 'audio', rank: 12,

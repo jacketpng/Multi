@@ -105,8 +105,10 @@ const containerSpecs = <ContainerSpec>[
     id: 'mov',
     label: 'MOV',
     extension: 'mov',
+    // No AV1: FFmpeg's mov muxer rejects it with "av1 only supported in
+    // MP4 and AVIF".
     video: {
-      'h264', 'hevc', 'av1', 'prores', 'dnxhd', 'mjpeg', 'mpeg4',
+      'h264', 'hevc', 'prores', 'dnxhd', 'mjpeg', 'mpeg4',
       'rawvideo', 'qtrle'
     },
     audio: {

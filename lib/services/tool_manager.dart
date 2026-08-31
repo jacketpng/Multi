@@ -43,6 +43,31 @@ class ToolManager extends ChangeNotifier {
 
   bool get initialized => _initialized;
   bool get checking => _checking;
+
+  /// True once first-run setup has settled: every tool has been checked
+  /// and is either usable or known to be unavailable here. The
+  /// onboarding screen waits on this.
+  bool get setupComplete {
+    if (!_initialized || _checking) return false;
+    return ToolId.values.every((id) => switch (_status[id]!.kind) {
+          ToolStatusKind.unknown ||
+          ToolStatusKind.checking ||
+          ToolStatusKind.downloading ||
+          ToolStatusKind.installing =>
+            false,
+          _ => true,
+        });
+  }
+
+  /// Tools that are usable right now.
+  int get readyCount => ToolId.values
+      .where((id) => _exePaths[id] != null)
+      .length;
+
+  /// Whether anything is missing or errored after setup.
+  bool get hasProblems => ToolId.values.any((id) =>
+      _status[id]!.kind == ToolStatusKind.missing ||
+      _status[id]!.kind == ToolStatusKind.error);
   ToolStatus statusOf(ToolId id) => _status[id]!;
   String? pathFor(ToolId id) => _exePaths[id];
   Directory get toolsDir => _toolsDir;
@@ -144,6 +169,57 @@ class ToolManager extends ChangeNotifier {
 
   Future<void> updateOne(ToolId id) =>
       _checkAndUpdate(toolSpecs.firstWhere((s) => s.id == id));
+
+  /// Path to Homebrew, if it is installed.
+  static Future<String?> homebrewPath() async {
+    if (!Platform.isMacOS && !Platform.isLinux) return null;
+    for (final candidate in [
+      '/opt/homebrew/bin/brew', // Apple Silicon
+      '/usr/local/bin/brew', // Intel
+      '/home/linuxbrew/.linuxbrew/bin/brew',
+    ]) {
+      if (await File(candidate).exists()) return candidate;
+    }
+    return PlatformUtil.which('brew');
+  }
+
+  /// Install a tool through Homebrew, for the platforms where nobody
+  /// ships a portable binary Multi could fetch itself (aria2 and
+  /// ImageMagick on macOS). Saves the user a trip to the terminal.
+  Future<void> installWithHomebrew(ToolId id) async {
+    final spec = toolSpecs.firstWhere((s) => s.id == id);
+    final formula = spec.brewFormula;
+    if (formula == null) return;
+    final brew = await homebrewPath();
+    if (brew == null) {
+      _set(
+          spec.id,
+          _status[id]!.copyWith(
+              kind: ToolStatusKind.missing,
+              message: 'Homebrew is not installed — see brew.sh'));
+      return;
+    }
+    _set(
+        spec.id,
+        _status[id]!.copyWith(
+            kind: ToolStatusKind.installing,
+            message: 'Installing $formula with Homebrew — this can take '
+                'a few minutes'));
+    try {
+      final r = await Process.run(brew, ['install', formula])
+          .timeout(const Duration(minutes: 20));
+      if (r.exitCode != 0) {
+        throw (r.stderr as String).trim().split('\n').last;
+      }
+    } catch (e) {
+      _set(
+          spec.id,
+          _status[id]!.copyWith(
+              kind: ToolStatusKind.error, message: 'brew install failed: $e'));
+      return;
+    }
+    await _resolveExisting(spec);
+  }
 
   Future<void> _checkAndUpdate(ToolSpec spec) async {
     final source = spec.sourceForThisPlatform;
@@ -355,6 +431,15 @@ class ToolManager extends ChangeNotifier {
     if (!Platform.isWindows) {
       for (final path in [exePath, ...extras.values]) {
         await Process.run('chmod', ['+x', path]);
+        if (Platform.isMacOS) {
+          // Anything downloaded carries com.apple.quarantine, and
+          // Gatekeeper refuses to execute a quarantined unsigned binary
+          // ("cannot be opened because the developer cannot be
+          // verified"). Clearing it is what lets a freshly fetched tool
+          // run without the user being sent to System Settings.
+          await Process.run('xattr', ['-d', 'com.apple.quarantine', path])
+              .catchError((_) => ProcessResult(0, 0, '', ''));
+        }
       }
     }
 

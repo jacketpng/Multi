@@ -6,6 +6,7 @@ import 'services/tool_manager.dart';
 import 'ui/pages/convert_page.dart';
 import 'ui/pages/download_page.dart';
 import 'ui/pages/image_page.dart';
+import 'ui/pages/onboarding_page.dart';
 import 'ui/pages/settings_page.dart';
 import 'ui/pages/tools_page.dart';
 
@@ -28,7 +29,37 @@ class MultiApp extends StatelessWidget {
         visualDensity: VisualDensity.comfortable,
       ),
       themeMode: ThemeMode.system,
-      home: const _Shell(),
+      home: const _Gate(),
+    );
+  }
+}
+
+/// Holds the app at the onboarding screen until the tools are in place,
+/// so nothing can be used half-installed. Shown once per launch while
+/// setup runs; it steps aside as soon as everything has settled.
+class _Gate extends StatefulWidget {
+  const _Gate();
+
+  @override
+  State<_Gate> createState() => _GateState();
+}
+
+class _GateState extends State<_Gate> {
+  bool _dismissed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tm = context.watch<ToolManager>();
+    // Once setup has finished cleanly, move on without making the user
+    // click; only stop for their attention if something is missing.
+    if (!_dismissed && tm.setupComplete && !tm.hasProblems) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_dismissed) setState(() => _dismissed = true);
+      });
+    }
+    if (_dismissed) return const _Shell();
+    return OnboardingPage(
+      onContinue: () => setState(() => _dismissed = true),
     );
   }
 }

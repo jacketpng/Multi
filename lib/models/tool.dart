@@ -122,6 +122,11 @@ class ToolSpec {
   /// Shown when no bundled build exists for this platform.
   final String? unavailableHint;
 
+  /// Homebrew formula, for platforms where nobody publishes a portable
+  /// binary. Lets Multi offer a one-click install instead of asking the
+  /// user to open a terminal.
+  final String? brewFormula;
+
   const ToolSpec({
     required this.id,
     required this.exeName,
@@ -129,6 +134,7 @@ class ToolSpec {
     required this.versionPattern,
     required this.sources,
     this.unavailableHint,
+    this.brewFormula,
   });
 
   InstallSource? get sourceForThisPlatform {
@@ -192,7 +198,10 @@ final List<ToolSpec> toolSpecs = [
       ),
       // No maintained static macOS build; fall back to a system install.
     },
-    unavailableHint: 'Install with: brew install aria2',
+    unavailableHint:
+        'Nobody publishes a portable macOS aria2 build, so Multi cannot '
+        'fetch it directly.',
+    brewFormula: 'aria2',
   ),
   ToolSpec(
     id: ToolId.ffmpeg,
@@ -246,6 +255,9 @@ final List<ToolSpec> toolSpecs = [
       ),
       // ImageMagick ships no portable macOS build; use Homebrew.
     },
-    unavailableHint: 'Install with: brew install imagemagick',
+    unavailableHint:
+        'ImageMagick publishes no macOS binaries, so Multi cannot fetch '
+        'it directly.',
+    brewFormula: 'imagemagick',
   ),
 ];

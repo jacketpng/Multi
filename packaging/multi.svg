@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7B73FF"/>
+      <stop offset="1" stop-color="#5A50E0"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <!-- Infinity mark: the app's "one tool for everything" glyph. -->
+  <path fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"
+        d="M64 64c-7-11-14-17-23-17a17 17 0 0 0 0 34c9 0 16-6 23-17zm0 0c7-11 14-17 23-17a17 17 0 0 1 0 34c-9 0-16-6-23-17z"/>
+  <!-- Download arrow, echoing the primary action. -->
+  <path fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+        opacity="0.9" d="M64 84v18m-9-9 9 9 9-9"/>
+</svg>

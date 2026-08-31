@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Multi
+GenericName=Media Multi-Tool
+Comment=Download, convert, and remux media with yt-dlp, gallery-dl, aria2, FFmpeg, and ImageMagick
+Exec=multi %U
+Icon=dev.multi.Multi
+Terminal=false
+# One main category (AudioVideo) plus additional ones, so the app shows
+# up once in the menu rather than under every heading.
+Categories=AudioVideo;AudioVideoEditing;Recorder;
+Keywords=download;youtube;video;audio;convert;remux;ffmpeg;yt-dlp;gallery-dl;aria2;imagemagick;
+StartupWMClass=multi
+MimeType=x-scheme-handler/magnet;

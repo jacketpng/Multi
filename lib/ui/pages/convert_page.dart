@@ -11,6 +11,7 @@ import '../../app.dart';
 import '../../models/convert.dart';
 import '../../services/convert_manager.dart';
 import '../../services/convert_planner.dart';
+import '../../ui/widgets/format_options_panel.dart';
 import '../../util/platform.dart';
 
 class ConvertPage extends StatefulWidget {
@@ -101,12 +102,17 @@ class _ConvertPageState extends State<ConvertPage> {
     await _load(file.path);
   }
 
-  void _selectTarget(ContainerSpec spec) {
+  Future<void> _selectTarget(ContainerSpec spec) async {
     final cm = context.read<ConvertManager>();
     setState(() {
       _target = spec;
       _plan = cm.planWithDefaults(_input!, spec);
     });
+    // Ask FFmpeg what these encoders accept, then show their options.
+    await cm.planner.loadCapabilities(_plan!, spec, cm.inventory);
+    if (!mounted || _plan == null) return;
+    cm.planner.recompute(_plan!, spec, cm.inventory);
+    setState(() {});
   }
 
   void _recompute() {
@@ -114,6 +120,12 @@ class _ConvertPageState extends State<ConvertPage> {
     final cm = context.read<ConvertManager>();
     cm.planner.recompute(_plan!, _target!, cm.inventory);
     setState(() {});
+    // A codec change brings a different encoder, with different options.
+    cm.planner
+        .loadCapabilities(_plan!, _target!, cm.inventory)
+        .then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   static const _mediaExtensions = {
@@ -283,6 +295,16 @@ class _ConvertPageState extends State<ConvertPage> {
             target: _target!,
             inventory: cm.inventory,
             onChanged: _recompute,
+          ),
+          const SizedBox(height: 12),
+          _TrimCard(plan: _plan!, onChanged: _recompute),
+          const SizedBox(height: 12),
+          FormatOptionsPanel(
+            plan: _plan!,
+            target: _target!,
+            inventory: cm.inventory,
+            planner: cm.planner,
+            onChanged: () => setState(() {}),
           ),
           const SizedBox(height: 12),
           _OutputCard(
@@ -1328,6 +1350,94 @@ class _FiltersSection extends StatelessWidget {
           },
         ),
       ],
+    );
+  }
+}
+
+/// Keep only part of the input.
+class _TrimCard extends StatelessWidget {
+  final ConvertPlan plan;
+  final VoidCallback onChanged;
+  const _TrimCard({required this.plan, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final on = (plan.trimStart ?? '').isNotEmpty ||
+        (plan.trimEnd ?? '').isNotEmpty;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 190,
+              child: CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text('Trim'),
+                value: on,
+                onChanged: (v) {
+                  if (v == true) {
+                    plan.trimStart = '00:00:00';
+                    plan.trimEnd = '';
+                  } else {
+                    plan.trimStart = null;
+                    plan.trimEnd = null;
+                  }
+                  onChanged();
+                },
+              ),
+            ),
+            if (on) ...[
+              SizedBox(
+                width: 130,
+                child: TextFormField(
+                  initialValue: plan.trimStart ?? '',
+                  decoration: const InputDecoration(
+                      labelText: 'From', hintText: '00:00:10', isDense: true),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  onChanged: (v) {
+                    plan.trimStart = v.trim();
+                    onChanged();
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 130,
+                child: TextFormField(
+                  initialValue: plan.trimEnd ?? '',
+                  decoration: const InputDecoration(
+                      labelText: 'To', hintText: '00:01:30', isDense: true),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  onChanged: (v) {
+                    plan.trimEnd = v.trim();
+                    onChanged();
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text('Times as hh:mm:ss or seconds. Leave To empty to '
+                    'run to the end.',
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelSmall
+                        ?.copyWith(color: cs.outline)),
+              ),
+            ] else
+              Expanded(
+                child: Text('Convert only part of the file.',
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelSmall
+                        ?.copyWith(color: cs.outline)),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

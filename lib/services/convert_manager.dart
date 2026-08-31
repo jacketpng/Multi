@@ -182,6 +182,25 @@ class ConvertManager extends ChangeNotifier {
     return plan;
   }
 
+  /// Plan, then ask FFmpeg what the chosen encoders accept so the UI can
+  /// offer exactly their options and the arguments can be tailored.
+  Future<ConvertPlan> planWithCapabilities(
+      ProbeResult input, ContainerSpec target) async {
+    await ensureHwDetected();
+    final plan = planWithDefaults(input, target);
+    await planner.loadCapabilities(plan, target, inventory);
+    planner.recompute(plan, target, inventory);
+    return plan;
+  }
+
+  /// Reload capabilities after a codec change, then recompute.
+  Future<void> refreshCapabilities(
+      ConvertPlan plan, ContainerSpec target) async {
+    await planner.loadCapabilities(plan, target, inventory);
+    planner.recompute(plan, target, inventory);
+    notifyListeners();
+  }
+
   ConvertJob enqueue(ConvertPlan plan, ContainerSpec target) {
     final out = outputPathFor(plan.input, target, outputDir: plan.outputDir);
     final job = ConvertJob(

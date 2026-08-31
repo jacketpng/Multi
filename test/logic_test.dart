@@ -882,6 +882,17 @@ Default=1
       expect(plan.actions[0].estimatedBytes, 160000); // 128kbps * 10s / 8
     });
 
+    test('trim times parse in every form people type', () {
+      expect(ConvertPlanner.parseTime('90'), 90);
+      expect(ConvertPlanner.parseTime('1:30'), 90);
+      expect(ConvertPlanner.parseTime('00:01:30'), 90);
+      expect(ConvertPlanner.parseTime('01:00:00'), 3600);
+      expect(ConvertPlanner.parseTime('00:00:01.5'), 1.5);
+      expect(ConvertPlanner.parseTime(''), isNull);
+      expect(ConvertPlanner.parseTime(null), isNull);
+      expect(ConvertPlanner.parseTime('nonsense'), isNull);
+    });
+
     test('parseBitrate handles k and M suffixes', () {
       expect(ConvertPlanner.parseBitrate('800k'), 800000);
       expect(ConvertPlanner.parseBitrate('4M'), 4000000);

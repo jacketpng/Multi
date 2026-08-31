@@ -314,9 +314,11 @@ class ConvertPlanner {
   /// arguments can be tailored to it. Cheap after the first call.
   Future<void> loadCapabilities(ConvertPlan plan, ContainerSpec target,
       EncoderInventory inv) async {
-    for (final a in plan.actions) {
-      if (a.kind != StreamActionKind.transcode) continue;
-      final encoder = encoderNameFor(a.targetCodec!, plan.settings, inv);
+    // Read the selection rather than the computed actions, so this does
+    // not depend on recompute() having run first.
+    for (final sel in plan.selection.values) {
+      if (sel == 'copy' || sel == 'drop') continue;
+      final encoder = encoderNameFor(sel, plan.settings, inv);
       if (encoder == null || plan.encoderCaps.containsKey(encoder)) continue;
       plan.encoderCaps[encoder] = await capabilities.encoder(encoder);
     }
@@ -802,6 +804,22 @@ class ConvertPlanner {
     return best;
   }
 
+  /// Seconds from 'hh:mm:ss(.ms)', 'mm:ss' or a plain number.
+  static double? parseTime(String? value) {
+    final v = value?.trim();
+    if (v == null || v.isEmpty) return null;
+    if (!v.contains(':')) return double.tryParse(v);
+    final parts = v.split(':');
+    if (parts.length > 3) return null;
+    var seconds = 0.0;
+    for (final part in parts) {
+      final n = double.tryParse(part.trim());
+      if (n == null) return null;
+      seconds = seconds * 60 + n;
+    }
+    return seconds;
+  }
+
   static int? parseBitrate(String s) {
     final m = RegExp(r'^\s*([\d.]+)\s*([kKmM]?)').firstMatch(s);
     if (m == null) return null;
@@ -900,13 +918,23 @@ class ConvertPlanner {
         '-filter_hw_device', 'va',
       ]);
     }
-    // Trimming before -i seeks fast; -to after it is exact.
-    if ((plan.trimStart ?? '').isNotEmpty) {
-      args.addAll(['-ss', plan.trimStart!]);
-    }
+    // Seeking before -i is fast, but it also rebases timestamps to zero,
+    // so a following -to would be measured from the seek point rather
+    // than from the start of the file — asking for 1s..3s would give
+    // three seconds, not two. Convert the end point to a duration.
+    final startSec = parseTime(plan.trimStart);
+    final endSec = parseTime(plan.trimEnd);
+    if (startSec != null) args.addAll(['-ss', plan.trimStart!.trim()]);
     args.addAll(['-i', plan.input.path]);
-    if ((plan.trimEnd ?? '').isNotEmpty) {
-      args.addAll(['-to', plan.trimEnd!]);
+    if (endSec != null) {
+      if (startSec != null) {
+        final duration = endSec - startSec;
+        if (duration > 0) {
+          args.addAll(['-t', duration.toStringAsFixed(3)]);
+        }
+      } else {
+        args.addAll(['-to', plan.trimEnd!.trim()]);
+      }
     }
 
     // A size cap overrides the rate settings with a computed bitrate.

@@ -10,6 +10,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:multi/models/convert.dart';
 import 'package:multi/models/tool.dart';
 import 'package:multi/services/convert_planner.dart';
+import 'package:multi/services/ffmpeg_capabilities.dart';
+import 'package:multi/services/ffmpeg_repair.dart';
 import 'package:multi/services/image_service.dart';
 import 'package:multi/services/tool_manager.dart';
 import 'package:path/path.dart' as p;
@@ -432,4 +434,118 @@ void main() {
     }
     work.deleteSync(recursive: true);
   }, timeout: const Timeout(Duration(minutes: 15)));
+
+  test('discovered encoder options really reach FFmpeg', () async {
+    final src = (await probeOrNull('$media/01_mp4_h264_aac.mp4'))!;
+    final target = spec('mp4');
+    print('\n--- DISCOVERED OPTIONS ---');
+    final plan = planner.plan(src, target, inventory: inventory);
+    plan.selection[0] = 'h264';
+    plan.settings.hwAccel = false;
+    plan.settings.hwAccelUserSet = true;
+    planner.recompute(plan, target, inventory);
+    await planner.loadCapabilities(plan, target, inventory);
+
+    final encoder =
+        planner.encoderNameFor('h264', plan.settings, inventory)!;
+    final caps = plan.encoderCaps[encoder] as EncoderCaps?;
+    check(caps != null, 'capabilities loaded for $encoder');
+    check((caps?.options.length ?? 0) > 20,
+        '$encoder exposes a real option list', '${caps?.options.length}');
+    print('  $encoder: ${caps!.options.length} options, '
+        '${caps.pixelFormats.length} pixel formats');
+
+    // Set a spread of option kinds and prove FFmpeg accepts them.
+    plan.streamOptions[0] = {
+      'preset': 'veryfast',   // string
+      'profile': 'main',      // string
+      'g': '48',              // int
+      'bf': '2',              // int
+      'aq-mode': 'variance',  // enum by name
+    };
+    plan.muxerOptions['movflags'] = '+faststart';
+    final res = await runPlan(plan, target, 'opts_h264');
+    check(res['ok'] == true, 'encode with discovered options',
+        (res['error'] ?? '').toString());
+    if (res['ok'] == true) {
+      final probe = res['probe'] as ProbeResult;
+      final v = probe.streams.firstWhere((x) => x.type == 'video');
+      check(v.profile?.toLowerCase().contains('main') ?? false,
+          'the profile option took effect', 'got ${v.profile}');
+      print('  set preset/profile/g/bf/aq-mode + movflags -> '
+          'output profile ${v.profile}');
+    }
+
+    // The same for an audio encoder.
+    final aplan = planner.plan(src, spec('m4a'), inventory: inventory);
+    final astream = src.streams.firstWhere((x) => x.type == 'audio');
+    aplan.selection[astream.index] = 'aac';
+    planner.recompute(aplan, spec('m4a'), inventory);
+    await planner.loadCapabilities(aplan, spec('m4a'), inventory);
+    aplan.streamOptions[astream.index] = {'aac_coder': 'fast'};
+    final ares = await runPlan(aplan, spec('m4a'), 'opts_aac');
+    check(ares['ok'] == true, 'audio encode with discovered options',
+        (ares['error'] ?? '').toString());
+    print('  aac with aac_coder=fast -> ${ares['ok'] == true ? 'ok' : 'FAILED'}');
+  }, timeout: const Timeout(Duration(minutes: 10)));
+
+  test('trimming keeps only the requested part', () async {
+    // A 5s source so a trim is measurable.
+    final long = '$media/trim_src.mp4';
+    await Process.run(tools.pathFor(ToolId.ffmpeg)!, [
+      '-y', '-v', 'error', '-f', 'lavfi', '-i',
+      'testsrc2=d=5:s=320x240:r=25', '-c:v', 'libx264', long,
+    ]);
+    final src = (await probeOrNull(long))!;
+    check((src.durationSeconds ?? 0) > 4.5, 'source is 5s');
+    print('\n--- TRIM ---');
+    final plan = planner.plan(src, spec('mp4'), inventory: inventory);
+    plan.trimStart = '00:00:01';
+    plan.trimEnd = '00:00:03';
+    planner.recompute(plan, spec('mp4'), inventory);
+    final res = await runPlan(plan, spec('mp4'), 'trimmed');
+    check(res['ok'] == true, 'trimmed conversion',
+        (res['error'] ?? '').toString());
+    if (res['ok'] == true) {
+      final d = (res['probe'] as ProbeResult).durationSeconds ?? 0;
+      check(d > 1.5 && d < 2.6, 'trim produced ~2s', 'got ${d.toStringAsFixed(2)}s');
+      print('  1s..3s of a 5s file -> ${d.toStringAsFixed(2)}s');
+    }
+    File(long).deleteSync();
+  }, timeout: const Timeout(Duration(minutes: 5)));
+
+  test('a broken command repairs itself and completes', () async {
+    print('\n--- SELF-REPAIR ---');
+    final src = (await probeOrNull('$media/30_anim.gif'))!;
+    final target = spec('webm');
+    final plan = planner.plan(src, target, inventory: inventory);
+    plan.selection[0] = 'vp9';
+    planner.recompute(plan, target, inventory);
+    // Deliberately break it the way a real encoder does: strip the
+    // pixel-format handling so FFmpeg meets an RGB frame.
+    var args = planner.buildArgs(plan, target, '$media/out/repair.webm',
+        inventory);
+    args = args
+        .where((a) => a != '-pix_fmt:0' && a != 'yuv420p')
+        .toList();
+    args.removeWhere((a) => a.contains('format=yuv420p'));
+    final first = await Process.run(tools.pathFor(ToolId.ffmpeg)!, args);
+    print('  unrepaired exit: ${first.exitCode}');
+
+    if (first.exitCode != 0) {
+      final repair = FfmpegRepair.diagnose(first.stderr as String);
+      check(repair != null, 'a repair was found for the real failure');
+      print('  diagnosis: ${repair?.description}');
+      if (repair != null) {
+        final fixed = FfmpegRepair.apply(args, repair);
+        final second =
+            await Process.run(tools.pathFor(ToolId.ffmpeg)!, fixed);
+        check(second.exitCode == 0, 'repaired command succeeds',
+            (second.stderr as String).split('\n').first);
+        print('  after repair exit: ${second.exitCode}');
+      }
+    } else {
+      print('  (already handled proactively — nothing to repair)');
+    }
+  }, timeout: const Timeout(Duration(minutes: 10)));
 }

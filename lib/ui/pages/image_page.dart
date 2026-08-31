@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
+import '../../app.dart';
 import '../../models/convert.dart';
 import '../../services/image_service.dart';
 import '../../util/platform.dart';
@@ -46,6 +47,7 @@ class _ImagePageState extends State<ImagePage> {
   @override
   Widget build(BuildContext context) {
     return DropTarget(
+      enable: PageVisibility.of(context),
       onDragEntered: (_) => setState(() => _dragging = true),
       onDragExited: (_) => setState(() => _dragging = false),
       onDragDone: (detail) {

@@ -10,6 +10,24 @@ import 'ui/pages/onboarding_page.dart';
 import 'ui/pages/settings_page.dart';
 import 'ui/pages/tools_page.dart';
 
+/// Tells a page whether it is the one currently on screen. Needed
+/// because IndexedStack keeps every page mounted, and desktop_drop
+/// notifies every mounted DropTarget whose bounds contain the pointer.
+class PageVisibility extends InheritedWidget {
+  final bool isActive;
+  const PageVisibility(
+      {super.key, required this.isActive, required super.child});
+
+  static bool of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<PageVisibility>()
+          ?.isActive ??
+      true;
+
+  @override
+  bool updateShouldNotify(PageVisibility old) => old.isActive != isActive;
+}
+
 class MultiApp extends StatelessWidget {
   const MultiApp({super.key});
 
@@ -145,12 +163,15 @@ class _ShellState extends State<_Shell> {
           Expanded(
             child: IndexedStack(
               index: _index,
-              children: const [
-                DownloadPage(),
-                ConvertPage(),
-                ImagePage(),
-                ToolsPage(),
-                SettingsPage(),
+              children: [
+                for (final (i, page) in const <Widget>[
+                  DownloadPage(),
+                  ConvertPage(),
+                  ImagePage(),
+                  ToolsPage(),
+                  SettingsPage(),
+                ].indexed)
+                  PageVisibility(isActive: i == _index, child: page),
               ],
             ),
           ),

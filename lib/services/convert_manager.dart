@@ -87,17 +87,30 @@ class ConvertManager extends ChangeNotifier {
           candidates.insert(0, 'nvenc');
         }
       }
-      final proven = <String>[];
+      // Probe every codec separately. A GPU routinely supports some and
+      // not others (this one does H.264 and HEVC over VAAPI but not VP9
+      // or AV1), so proving one codec says nothing about the rest —
+      // assuming otherwise produced commands that failed at runtime.
+      final proven = <String>{};
+      final families = <String>[];
       for (final family in candidates) {
-        if (await _smokeTest(ffmpeg, family, parsed.encoders)) {
-          proven.add(family);
+        var anyWorked = false;
+        for (final codec in const ['h264', 'hevc', 'av1', 'vp9']) {
+          final encoder = '${codec}_$family';
+          if (!parsed.encoders.contains(encoder)) continue;
+          if (await _smokeTest(ffmpeg, family, encoder)) {
+            proven.add(encoder);
+            anyWorked = true;
+          }
         }
+        if (anyWorked) families.add(family);
       }
       inventory = EncoderInventory(
         encoders: parsed.encoders,
         codecOf: parsed.codecOf,
         kindOf: parsed.kindOf,
-        hwFamilies: proven,
+        hwFamilies: families,
+        provenHwEncoders: proven,
       );
     } catch (_) {
       inventory = EncoderInventory.empty;
@@ -105,15 +118,9 @@ class ConvertManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Encode a fraction of a second of test video with the family's
-  /// H.264 encoder (or whichever codec it has) to /dev/null.
+  /// Prove one specific hardware encoder by really encoding with it.
   Future<bool> _smokeTest(
-      String ffmpeg, String family, Set<String> available) async {
-    final codec = ['h264', 'hevc', 'av1', 'vp9']
-        .where((c) => available.contains('${c}_$family'))
-        .firstOrNull;
-    if (codec == null) return false;
-    final encoder = '${codec}_$family';
+      String ffmpeg, String family, String encoder) async {
     final args = <String>[
       '-v', 'error',
       if (family == 'vaapi') ...[

@@ -34,6 +34,11 @@ class ContainerSpec {
   final String? subtitleTarget;
   final List<String> extraOutputArgs;
 
+  /// Elementary-stream containers that hold exactly one audio track.
+  /// FFmpeg rejects a second with "Exactly one ... audio stream is
+  /// required", so extra tracks have to be dropped rather than offered.
+  final bool singleAudioStream;
+
   const ContainerSpec({
     required this.id,
     required this.label,
@@ -46,6 +51,7 @@ class ContainerSpec {
     required this.audioTarget,
     this.subtitleTarget,
     this.extraOutputArgs = const [],
+    this.singleAudioStream = false,
   });
 
   bool get allowsAnyVideo => video.contains('*');
@@ -123,11 +129,17 @@ const containerSpecs = <ContainerSpec>[
     id: 'avi',
     label: 'AVI',
     extension: 'avi',
+    // No H.264: MP4 and MKV carry it in AVCC form and AVI needs
+    // Annex-B, so copying one in fails with "h264 bitstream malformed,
+    // no startcode found". AVI's native codecs are the MPEG-4 family.
     video: {
-      'mpeg4', 'h264', 'mjpeg', 'huffyuv', 'ffv1', 'utvideo', 'magicyuv',
+      'mpeg4', 'mjpeg', 'huffyuv', 'ffv1', 'utvideo', 'magicyuv',
       'rawvideo', 'dvvideo', 'mpeg2video', 'wmv2'
     },
-    audio: {'mp3', 'ac3', 'pcm_s16le', 'aac', 'mp2', 'wmav2'},
+    // No AAC: FFmpeg's avi muxer rejects an AAC packet copy with
+    // "Invalid data found when processing input". MP3 is the format AVI
+    // is actually used with.
+    audio: {'mp3', 'ac3', 'pcm_s16le', 'mp2', 'wmav2'},
     videoTarget: 'mpeg4',
     audioTarget: 'mp3',
   ),
@@ -152,6 +164,7 @@ const containerSpecs = <ContainerSpec>[
   // Audio-only targets.
   ContainerSpec(
     id: 'mp3',
+    singleAudioStream: true,
     label: 'MP3',
     extension: 'mp3',
     audioOnly: true,
@@ -184,6 +197,7 @@ const containerSpecs = <ContainerSpec>[
   ),
   ContainerSpec(
     id: 'flac',
+    singleAudioStream: true,
     label: 'FLAC',
     extension: 'flac',
     audioOnly: true,
@@ -192,6 +206,7 @@ const containerSpecs = <ContainerSpec>[
   ),
   ContainerSpec(
     id: 'wav',
+    singleAudioStream: true,
     label: 'WAV',
     extension: 'wav',
     audioOnly: true,
@@ -200,6 +215,7 @@ const containerSpecs = <ContainerSpec>[
   ),
   ContainerSpec(
     id: 'ac3',
+    singleAudioStream: true,
     label: 'AC-3',
     extension: 'ac3',
     audioOnly: true,
@@ -219,14 +235,22 @@ class EncoderInventory {
   /// encoder name → 'video' | 'audio'.
   final Map<String, String> kindOf;
 
-  /// Hardware families proven to work here, best first.
+  /// Hardware families available here, best first.
   final List<String> hwFamilies;
+
+  /// Hardware encoders proven to work by a real test encode, by exact
+  /// name ('h264_vaapi'). A GPU commonly supports some codecs and not
+  /// others — this machine encodes H.264 and HEVC through VAAPI but not
+  /// VP9 or AV1 — so the family alone says nothing about a given codec.
+  /// Empty means "not probed yet"; treat every listed family as usable.
+  final Set<String> provenHwEncoders;
 
   const EncoderInventory({
     this.encoders = const {},
     this.codecOf = const {},
     this.kindOf = const {},
     this.hwFamilies = const [],
+    this.provenHwEncoders = const {},
   });
 
   static const empty = EncoderInventory();
@@ -253,11 +277,18 @@ class EncoderInventory {
         encoders: encoders, codecOf: codecOf, kindOf: kindOf, hwFamilies: hw);
   }
 
-  /// Best hardware encoder for a codec, or null.
+  /// Best hardware encoder for a codec that this machine can really
+  /// use, or null.
   String? hwEncoderFor(String codecId) {
     for (final family in hwFamilies) {
       final name = '${codecId}_$family';
-      if (encoders.contains(name)) return name;
+      if (!encoders.contains(name)) continue;
+      // Once probing has happened, only an encoder that actually
+      // produced a frame counts.
+      if (provenHwEncoders.isNotEmpty && !provenHwEncoders.contains(name)) {
+        continue;
+      }
+      return name;
     }
     return null;
   }
@@ -314,6 +345,7 @@ class ConvertPlanner {
         sampleRate: int.tryParse(s['sample_rate']?.toString() ?? ''),
         fps: fps,
         bitRate: int.tryParse(s['bit_rate']?.toString() ?? ''),
+        pixFmt: s['pix_fmt'] as String?,
         attachedPic: ((s['disposition']
                     as Map<String, dynamic>?)?['attached_pic'] as int?) ==
             1,
@@ -407,6 +439,11 @@ class ConvertPlanner {
         case 'audio':
           if (target.audio.isEmpty) {
             selection[s.index] = 'drop';
+          } else if (target.singleAudioStream &&
+              input.streams.any((o) =>
+                  o.type == 'audio' && o.index < s.index)) {
+            // Only the first track survives in a single-stream container.
+            selection[s.index] = 'drop';
           } else if (target.allows('audio', s.codec)) {
             selection[s.index] = 'copy';
           } else {
@@ -484,11 +521,21 @@ class ConvertPlanner {
       [EncoderInventory inventory = EncoderInventory.empty]) {
     applyHardwareDefault(plan, inventory);
     final dur = plan.input.durationSeconds;
-    plan.actions = [
-      for (final s in plan.input.streams)
-        _action(s, plan.selection[s.index] ?? 'drop', target, plan.settings,
-            dur, inventory),
-    ];
+    List<StreamAction> build() => [
+          for (final s in plan.input.streams)
+            _action(s, plan.selection[s.index] ?? 'drop', target,
+                plan.settings, dur, inventory),
+        ];
+    plan.actions = build();
+    // A size cap depends on what the audio actually costs, which is only
+    // known once the actions exist — so work it out, then rebuild so the
+    // video estimate reflects the capped bitrate.
+    if (plan.settings.sizeCapMb != null) {
+      plan.settings.cappedVideoBps = videoBitrateForSizeCap(plan);
+      plan.actions = build();
+    } else {
+      plan.settings.cappedVideoBps = null;
+    }
   }
 
   StreamAction _action(StreamInfo s, String sel, ContainerSpec target,
@@ -501,7 +548,10 @@ class ConvertPlanner {
         'video' => target.audioOnly
             ? '${target.label} holds audio only'
             : '${target.label} can\'t hold this video',
-        'audio' => '${target.label} holds no audio',
+        'audio' => target.audio.isEmpty
+            ? '${target.label} holds no audio'
+            : '${target.label} holds a single audio track, and this is not '
+                'the first',
         'subtitle' => _isImageSub(s.codec)
             ? 'Image-based subtitles can\'t become text in ${target.label}'
             : '${target.label} has no subtitle support',
@@ -571,8 +621,11 @@ class ConvertPlanner {
     if (c.kind == 'video') {
       if (s.width == null || s.height == null) return null;
       if (st.sizeCapMb != null) {
-        // The cap decides the bitrate outright.
-        return st.sizeCapMb! * 1000 * 1000;
+        // The cap decides the bitrate outright; the audio streams carry
+        // their own estimate, so only the video share belongs here.
+        final bps = st.cappedVideoBps;
+        if (bps == null) return null;
+        return (bps * dur / 8).round();
       }
       if (st.mode == RateMode.constantBitrate) {
         rate = parseBitrate(st.videoBitrate)?.toDouble() ?? 4e6;
@@ -600,9 +653,37 @@ class ConvertPlanner {
         final scale = qualityScale(codecId, st, inv);
         final quality = st.crf ?? scale.$3;
         // Each ~6 steps roughly halves or doubles the size.
-        final factor =
-            math.pow(2, (scale.$3 - quality) / 6.0).toDouble();
-        rate = c.bpp * width * height * fps * factor;
+        final factor = math.pow(2, (scale.$3 - quality) / 6.0).toDouble();
+
+        // Constant quality spends bits according to how complex the
+        // picture is, which a bits-per-pixel constant cannot know: the
+        // same 1080p30 frame costs wildly different amounts for a
+        // gradient and for confetti. Measured against real encodes, the
+        // constant was ~5x too high on ordinary footage.
+        //
+        // The source's own bitrate already encodes that complexity, so
+        // anchor to it and adjust for the things that genuinely change:
+        // codec efficiency, pixel count, frame rate and quality.
+        final sourceRate = s.bitRate?.toDouble();
+        if (sourceRate != null && sourceRate > 0) {
+          final srcInfo = CodecCatalog.byId(s.codec);
+          final srcBpp =
+              (srcInfo != null && srcInfo.bpp > 0) ? srcInfo.bpp : c.bpp;
+          final efficiency = srcBpp > 0 ? c.bpp / srcBpp : 1.0;
+          final srcPixels =
+              s.width! * s.height! * (s.fps ?? 30);
+          final newPixels = width * height * fps;
+          final pixelRatio = srcPixels > 0 ? newPixels / srcPixels : 1.0;
+          // Re-encoding lossy footage costs a little extra, because the
+          // previous encoder's artefacts are themselves detail to carry.
+          const generationLoss = 1.10;
+          rate = sourceRate * efficiency * pixelRatio * factor *
+              generationLoss;
+        } else {
+          // No reported bitrate (raw or odd containers): fall back to
+          // the bits-per-pixel model.
+          rate = c.bpp * width * height * fps * factor;
+        }
         // Hardware encoders are a little less efficient at equal quality.
         if (st.hwAccel && inv.hwEncoderFor(codecId) != null) rate *= 1.15;
       }
@@ -671,6 +752,56 @@ class ConvertPlanner {
     };
   }
 
+  /// Bits per second of audio that will actually end up in the output.
+  ///
+  /// A copied track keeps the source's own bitrate, so a size cap has to
+  /// read the real streams rather than assume the target codec's
+  /// default — otherwise the budget is wrong for exactly the common
+  /// case of copying a 640 kbps AC-3 track.
+  double audioBitsPerSecond(ConvertPlan plan) {
+    final st = plan.settings;
+    var bps = 0.0;
+    for (final a in plan.actions) {
+      if (a.stream.type != 'audio' || a.kind == StreamActionKind.drop) {
+        continue;
+      }
+      if (a.kind == StreamActionKind.copy) {
+        bps += (a.stream.bitRate ?? 128000).toDouble();
+        continue;
+      }
+      final c = CodecCatalog.byId(a.targetCodec ?? '');
+      if (c != null && c.lossless) {
+        bps += (a.stream.channels ?? 2) *
+            (a.stream.sampleRate ?? 48000) *
+            16.0 *
+            0.6;
+      } else {
+        bps += ((st.audioKbps ?? c?.defaultKbps ?? 128) * 1000).toDouble();
+      }
+    }
+    return bps;
+  }
+
+  /// True when a size cap can actually be honoured: it works by setting
+  /// the video bitrate, so there has to be a video stream being encoded.
+  /// A copied stream keeps whatever size it already has.
+  bool sizeCapApplies(ConvertPlan plan) =>
+      transcodedVideoCodec(plan) != null;
+
+  /// Video bitrate a size cap leaves once the real audio is paid for.
+  int? videoBitrateForSizeCap(ConvertPlan plan) {
+    final cap = plan.settings.sizeCapMb;
+    final dur = plan.input.durationSeconds;
+    if (cap == null || dur == null || dur <= 0) return null;
+    if (!sizeCapApplies(plan)) return null;
+    final totalBits = cap * 1000.0 * 1000.0 * 8;
+    final audioBits = audioBitsPerSecond(plan) * dur;
+    // Keep a 3% margin for container overhead.
+    final videoBits = (totalBits - audioBits) * 0.97;
+    if (videoBits <= 0) return null;
+    return (videoBits / dur).round();
+  }
+
   /// Video bitrate implied by a size cap, leaving room for audio.
   static int? bitrateForSizeCap(
       int capMb, double? durationSeconds, int audioKbps) {
@@ -687,6 +818,12 @@ class ConvertPlanner {
 
   List<String> buildArgs(ConvertPlan plan, ContainerSpec target,
       String outputPath, EncoderInventory inv) {
+    if (plan.keepsNothing) {
+      // Without a single -map, FFmpeg picks streams by its own rules and
+      // writes something nobody asked for.
+      throw 'Nothing to convert: no stream survives into '
+          '${target.label}';
+    }
     final st = plan.settings;
     final args = <String>['-y', '-hide_banner'];
 
@@ -706,11 +843,7 @@ class ConvertPlanner {
     // A size cap overrides the rate settings with a computed bitrate.
     String? cappedBitrate;
     if (st.sizeCapMb != null) {
-      final audioKbps = st.audioKbps ??
-          CodecCatalog.byId(target.audioTarget)?.defaultKbps ??
-          128;
-      final bps = bitrateForSizeCap(
-          st.sizeCapMb!, plan.input.durationSeconds, audioKbps);
+      final bps = st.cappedVideoBps ?? videoBitrateForSizeCap(plan);
       if (bps != null && bps > 0) cappedBitrate = '${(bps / 1000).round()}k';
     }
 
@@ -723,10 +856,10 @@ class ConvertPlanner {
       if (a.kind == StreamActionKind.copy) {
         codecArgs.addAll(['-c:$i', 'copy']);
       } else if (a.stream.type == 'video') {
-        codecArgs.addAll(
-            _videoArgs(a.targetCodec!, i, st, inv, target, cappedBitrate));
+        codecArgs.addAll(_videoArgs(
+            a.targetCodec!, i, st, inv, target, cappedBitrate, a.stream));
       } else if (a.stream.type == 'audio') {
-        codecArgs.addAll(_audioArgs(a.targetCodec!, i, st));
+        codecArgs.addAll(_audioArgs(a.targetCodec!, i, st, a.stream));
       } else {
         codecArgs.addAll(['-c:$i', a.targetCodec ?? 'srt']);
       }
@@ -739,9 +872,49 @@ class ConvertPlanner {
     return args;
   }
 
+  /// What a rigid format needs before it will accept a frame.
+  ({List<String> filters, List<String> args}) _adaptationFor(
+      String codecId, StreamInfo? source, ContainerSpec target) {
+    switch (codecId) {
+      case 'dvvideo':
+        // DV is only defined at NTSC and PAL geometry; anything else is
+        // rejected outright. Pick whichever matches the source rate.
+        final ntsc = (source?.fps ?? 30) >= 27;
+        return (
+          filters: [
+            ntsc ? 'scale=720:480' : 'scale=720:576',
+            ntsc ? 'fps=30000/1001' : 'fps=25',
+            ntsc ? 'format=yuv411p' : 'format=yuv420p',
+          ],
+          args: const <String>[],
+        );
+      case 'dnxhd':
+        // Plain DNxHD only accepts a handful of broadcast profiles.
+        // DNxHR takes any even frame size, so use it and round up.
+        return (
+          filters: ['scale=trunc(iw/2)*2:trunc(ih/2)*2', 'format=yuv422p'],
+          args: const ['-profile:v', 'dnxhr_hq'],
+        );
+      case 'prores':
+        return (filters: ['format=yuv422p10le'], args: const <String>[]);
+      case 'rawvideo':
+        // QuickTime stores uncompressed video packed, not planar: with
+        // yuv420p FFmpeg still exits 0 but warns the file "will be
+        // unreadable", and it is.
+        final packed = target.id == 'mov' || target.id == 'mp4';
+        return (
+          filters: [packed ? 'format=uyvy422' : 'format=yuv420p'],
+          args: const <String>[],
+        );
+      default:
+        return (filters: const <String>[], args: const <String>[]);
+    }
+  }
+
   /// Filter chain for a transcoded video stream, VAAPI-aware.
-  List<String> _filterChain(TranscodeSettings st, bool vaapi) {
-    final chain = st.filters.chain();
+  List<String> _filterChain(TranscodeSettings st, bool vaapi,
+      {List<String> extra = const []}) {
+    final chain = [...st.filters.chain(), ...extra];
     if (vaapi) {
       // Software filters run before the frame is uploaded to the GPU.
       return [...chain, 'format=nv12', 'hwupload'];
@@ -750,7 +923,8 @@ class ConvertPlanner {
   }
 
   List<String> _videoArgs(String codecId, int i, TranscodeSettings st,
-      EncoderInventory inv, ContainerSpec target, String? cappedBitrate) {
+      EncoderInventory inv, ContainerSpec target, String? cappedBitrate,
+      [StreamInfo? source]) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'video', codecId);
     final hwEnc = st.hwAccel ? inv.hwEncoderFor(codecId) : null;
@@ -762,10 +936,29 @@ class ConvertPlanner {
         !scale.$4;
     final rate = cappedBitrate ?? st.videoBitrate;
 
-    final filters = _filterChain(st, hwEnc != null && hwEnc.endsWith('_vaapi'));
+    // Some formats only accept particular frame sizes, rates or pixel
+    // layouts. Rather than refusing them, give them what they need.
+    final adapt = _adaptationFor(codecId, source, target);
+    final filters = [
+      ..._filterChain(st, hwEnc != null && hwEnc.endsWith('_vaapi'),
+          extra: adapt.filters),
+    ];
     final out = <String>[
       if (filters.isNotEmpty) ...['-filter:$i', filters.join(',')],
+      ...adapt.args,
     ];
+
+    // Sources like GIF and PNG are RGB/palettised, which the lossy video
+    // encoders reject ("Pixel format 'gbrap' is not widely supported").
+    // Planar YUV sources, including 10-bit, are left alone.
+    final srcPix = source?.pixFmt;
+    if (adapt.filters.isEmpty &&
+        !c.lossless &&
+        c.encoder != 'gif' &&
+        srcPix != null &&
+        !srcPix.startsWith('yuv')) {
+      out.addAll(['-pix_fmt:$i', 'yuv420p']);
+    }
 
     if (hwEnc != null && family != null) {
       out.addAll(['-c:$i', hwEnc]);
@@ -842,17 +1035,33 @@ class ConvertPlanner {
       case 'prores_aw':
         out.addAll(['-profile:$i', '3']);
         break;
+      case 'dnxhd':
+        break; // profile supplied by the adaptation above
       default:
         if (useBitrate && c.bpp > 0 && !c.lossless) out.addAll(['-b:$i', rate]);
     }
     return out;
   }
 
-  List<String> _audioArgs(String codecId, int i, TranscodeSettings st) {
+  List<String> _audioArgs(
+      String codecId, int i, TranscodeSettings st, StreamInfo source) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'audio', codecId);
+    final channels = source.channels ?? 2;
+    final overChannelLimit = c.maxChannels > 0 && channels > c.maxChannels;
     return [
       '-c:$i', c.encoder,
+      // Stereo-only encoders (MP3, MP2, WMA) reject surround outright.
+      if (overChannelLimit) ...['-ac:$i', '${c.maxChannels}'],
+      // FFmpeg refuses its experimental encoders without this.
+      if (c.experimental) ...['-strict', '-2'],
+      // libopus rejects layouts like 5.1(side) outright — and
+      // -mapping_family does not help. Normalising the layout to one it
+      // recognises does.
+      if (c.encoder == 'libopus' && channels > 2) ...[
+        '-filter:$i', 'aformat=channel_layouts=7.1|5.1|quad|stereo|mono',
+        '-mapping_family:$i', '1',
+      ],
       if (!c.lossless) ...['-b:$i', '${st.audioKbps ?? c.defaultKbps}k'],
     ];
   }

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
+import '../../app.dart';
 import '../../models/convert.dart';
 import '../../services/convert_manager.dart';
 import '../../services/convert_planner.dart';
@@ -129,17 +131,23 @@ class _ConvertPageState extends State<ConvertPage> {
           .addPostFrameCallback((_) => _takeDownloadHandoff());
     }
     return DropTarget(
+      enable: PageVisibility.of(context),
       onDragEntered: (_) => setState(() => _dragging = true),
       onDragExited: (_) => setState(() => _dragging = false),
       onDragDone: (detail) {
         setState(() => _dragging = false);
-        final file = detail.files.firstWhere(
-            (f) => _mediaExtensions
-                .contains(p.extension(f.path).replaceFirst('.', '').toLowerCase()),
-            orElse: () => detail.files.isEmpty
-                ? throw StateError('no files')
-                : detail.files.first);
-        _load(file.path);
+        // Work with plain paths: firstWhere's orElse has to return the
+        // element type exactly, and a throwing closure there fails the
+        // runtime type check before it is ever called — which is what
+        // silently swallowed every drop.
+        final paths = detail.files.map((f) => f.path).toList();
+        if (paths.isEmpty) return;
+        final media = paths.firstWhere(
+          (path) => _mediaExtensions.contains(
+              p.extension(path).replaceFirst('.', '').toLowerCase()),
+          orElse: () => paths.first,
+        );
+        _load(media);
       },
       child: Stack(
         children: [
@@ -284,10 +292,30 @@ class _ConvertPageState extends State<ConvertPage> {
             onChanged: () => setState(() {}),
           ),
           const SizedBox(height: 16),
+          if (_plan!.keepsNothing)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(children: [
+                Icon(Icons.block,
+                    size: 16, color: Theme.of(context).colorScheme.error),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Nothing would survive into ${_target!.label} — this file '
+                    'has no stream that container can hold. Pick a different '
+                    'container.',
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.error),
+                  ),
+                ),
+              ]),
+            ),
           Align(
             alignment: Alignment.centerLeft,
             child: FilledButton.icon(
-              onPressed: () {
+              onPressed: _plan!.keepsNothing
+                  ? null
+                  : () {
                 cm.enqueue(_plan!, _target!);
                 setState(() {
                   _plan = null;
@@ -833,28 +861,12 @@ class _TranscodeSettingsPanel extends StatelessWidget {
             ),
           ],
           if (!capped && (st.mode == RateMode.constantBitrate || !cqSupported))
-            Row(
-              children: [
-                const SizedBox(width: 190, child: Text('Video bitrate')),
-                SizedBox(
-                  width: 120,
-                  child: TextFormField(
-                    initialValue: st.videoBitrate,
-                    decoration:
-                        const InputDecoration(isDense: true, hintText: '4M'),
-                    onChanged: (v) {
-                      st.videoBitrate = v.trim().isEmpty ? '4M' : v.trim();
-                      onChanged();
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text('e.g. 800k, 4M, 12M',
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelSmall
-                        ?.copyWith(color: cs.outline)),
-              ],
+            _BitrateSlider(
+              value: st.videoBitrate,
+              onChanged: (v) {
+                st.videoBitrate = v;
+                onChanged();
+              },
             ),
           SwitchListTile(
             dense: true,
@@ -922,59 +934,226 @@ class _TranscodeSettingsPanel extends StatelessWidget {
       };
 }
 
-/// Keep the output under a chosen size — for upload limits.
+/// Keep the output under a chosen size — for upload limits. Off by
+/// default; ticking it reveals the size control.
 class _SizeCapRow extends StatelessWidget {
   final ConvertPlan plan;
   final VoidCallback onChanged;
   const _SizeCapRow({required this.plan, required this.onChanged});
 
-  static const _presets = <int?, String>{
-    null: 'No limit',
-    8: '8 MB (Discord)',
-    10: '10 MB (Discord free)',
-    25: '25 MB (Gmail, Discord Nitro Basic)',
-    50: '50 MB (Discord Nitro)',
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final st = plan.settings;
+    final planner = context.read<ConvertManager>().planner;
+    final on = st.sizeCapMb != null;
+    final applies = planner.sizeCapApplies(plan);
+    final bps = on ? planner.videoBitrateForSizeCap(plan) : null;
+    final audioKbps = (planner.audioBitsPerSecond(plan) / 1000).round();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: 190,
+              child: CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text('Cap file size'),
+                value: on,
+                onChanged: (v) {
+                  st.sizeCapMb = (v ?? false) ? 25 : null;
+                  onChanged();
+                },
+              ),
+            ),
+            if (on)
+              Expanded(
+                child: _MbSlider(
+                  valueMb: st.sizeCapMb!,
+                  onChanged: (mb) {
+                    st.sizeCapMb = mb;
+                    onChanged();
+                  },
+                ),
+              )
+            else
+              Expanded(
+                child: Text(
+                  'Fit the result under a size limit — for Discord, email, '
+                  'or anywhere with an upload cap.',
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(color: cs.outline),
+                ),
+              ),
+          ],
+        ),
+        if (on)
+          Padding(
+            padding: const EdgeInsets.only(left: 190, bottom: 4),
+            child: Text(
+              !applies
+                  ? 'The video is being copied, so its size is already '
+                      'fixed — pick a codec for the video stream above for '
+                      'the cap to do anything.'
+                  : bps == null
+                      ? 'This clip has no known duration, so a size cap '
+                          'cannot be worked out.'
+                      : 'Video encoded at ~${(bps / 1000).round()} kbps, '
+                          'after leaving $audioKbps kbps for the audio.',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: (!applies || bps == null) ? cs.error : cs.outline),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// A size picker: free slider plus exact entry, with the common upload
+/// limits marked so they are one tap away without being the only
+/// choices.
+class _MbSlider extends StatelessWidget {
+  final int valueMb;
+  final ValueChanged<int> onChanged;
+  const _MbSlider({required this.valueMb, required this.onChanged});
+
+  static const _min = 1.0;
+  static const _max = 4096.0;
+
+  // Megabytes span three orders of magnitude, so a linear slider would
+  // make everything under 100 MB unusable. Map the track
+  // logarithmically instead.
+  static double _toSlider(num mb) =>
+      (math.log(mb.clamp(_min, _max)) - math.log(_min)) /
+      (math.log(_max) - math.log(_min));
+  static int _fromSlider(double t) =>
+      math.exp(math.log(_min) + t * (math.log(_max) - math.log(_min)))
+          .round()
+          .clamp(_min.toInt(), _max.toInt());
+
+  static const _presets = <int, String>{
+    10: 'Discord',
+    25: 'Gmail',
+    50: 'Discord Nitro',
     100: '100 MB',
-    500: '500 MB',
   };
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final st = plan.settings;
-    final dur = plan.input.durationSeconds;
-    final bps = st.sizeCapMb == null
-        ? null
-        : ConvertPlanner.bitrateForSizeCap(
-            st.sizeCapMb!, dur, st.audioKbps ?? 128);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Slider(
+                value: _toSlider(valueMb),
+                onChanged: (t) => onChanged(_fromSlider(t)),
+              ),
+            ),
+            SizedBox(
+              width: 92,
+              child: TextField(
+                key: ValueKey(valueMb),
+                controller: TextEditingController(text: '$valueMb'),
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    isDense: true, suffixText: 'MB', border: OutlineInputBorder()),
+                onSubmitted: (v) {
+                  final n = int.tryParse(v.trim());
+                  if (n != null && n > 0) onChanged(n.clamp(1, 100000));
+                },
+              ),
+            ),
+          ],
+        ),
+        Wrap(
+          spacing: 6,
+          children: [
+            for (final e in _presets.entries)
+              ActionChip(
+                label: Text('${e.key} MB · ${e.value}'),
+                labelStyle: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: cs.outline),
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onPressed: () => onChanged(e.key),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Bitrate as a slider rather than a text box, on a log scale because
+/// useful values run from a few hundred kbps to tens of megabits.
+class _BitrateSlider extends StatelessWidget {
+  final String value; // '4M', '800k'
+  final ValueChanged<String> onChanged;
+  const _BitrateSlider({required this.value, required this.onChanged});
+
+  static const _minBps = 100000.0; // 100 kbps
+  static const _maxBps = 120000000.0; // 120 Mbps
+
+  static double _toSlider(double bps) =>
+      (math.log(bps.clamp(_minBps, _maxBps)) - math.log(_minBps)) /
+      (math.log(_maxBps) - math.log(_minBps));
+
+  static double _fromSlider(double t) =>
+      math.exp(math.log(_minBps) + t * (math.log(_maxBps) - math.log(_minBps)));
+
+  static String _format(double bps) {
+    if (bps >= 1000000) {
+      final m = bps / 1000000;
+      return '${m >= 10 ? m.round() : double.parse(m.toStringAsFixed(1))}M';
+    }
+    return '${(bps / 1000).round()}k';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final bps = (ConvertPlanner.parseBitrate(value) ?? 4000000).toDouble();
     return Row(
       children: [
-        const SizedBox(width: 190, child: Text('Cap file size')),
-        DropdownButton<int?>(
-          value: _presets.containsKey(st.sizeCapMb) ? st.sizeCapMb : null,
-          isDense: true,
-          items: [
-            for (final e in _presets.entries)
-              DropdownMenuItem(value: e.key, child: Text(e.value)),
-          ],
-          onChanged: (v) {
-            st.sizeCapMb = v;
-            onChanged();
-          },
-        ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 190, child: Text('Video bitrate')),
         Expanded(
-          child: Text(
-            st.sizeCapMb == null
-                ? 'Useful for upload limits — sets the bitrate to fit.'
-                : bps == null
-                    ? 'The clip has no known duration, so a size cap can\'t be worked out.'
-                    : 'Encoding at ~${(bps / 1000).round()} kbps to land under ${st.sizeCapMb} MB.',
-            style: Theme.of(context)
-                .textTheme
-                .labelSmall
-                ?.copyWith(color: cs.outline),
+          child: Slider(
+            value: _toSlider(bps),
+            onChanged: (t) => onChanged(_format(_fromSlider(t))),
           ),
+        ),
+        SizedBox(
+          width: 92,
+          child: TextField(
+            key: ValueKey(value),
+            controller: TextEditingController(text: value),
+            decoration: const InputDecoration(
+                isDense: true, border: OutlineInputBorder()),
+            onSubmitted: (v) {
+              final parsed = ConvertPlanner.parseBitrate(v.trim());
+              if (parsed != null && parsed > 0) onChanged(v.trim());
+            },
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 74,
+          child: Text('${(bps / 1000000).toStringAsFixed(1)} Mbps',
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: cs.outline)),
         ),
       ],
     );

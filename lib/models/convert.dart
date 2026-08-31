@@ -10,6 +10,7 @@ class StreamInfo {
   final int? sampleRate;
   final double? fps;
   final int? bitRate; // bits per second, when the container reports it
+  final String? pixFmt; // e.g. yuv420p, yuv420p10le, bgra, pal8
   final bool attachedPic;
 
   StreamInfo({
@@ -24,6 +25,7 @@ class StreamInfo {
     this.sampleRate,
     this.fps,
     this.bitRate,
+    this.pixFmt,
     this.attachedPic = false,
   });
 
@@ -199,6 +201,10 @@ class TranscodeSettings {
   /// Remove the source file once the conversion succeeds.
   bool deleteSourceWhenDone = false;
 
+  /// Video bitrate the size cap works out to, in bits per second.
+  /// Derived by the planner, not set by the user.
+  int? cappedVideoBps;
+
   final VideoFilters filters = VideoFilters();
 }
 
@@ -227,6 +233,15 @@ class ConvertPlan {
     required this.targetContainer,
     required this.selection,
   });
+
+  /// Streams that survive into the output.
+  int get keptCount =>
+      actions.where((a) => a.kind != StreamActionKind.drop).length;
+
+  /// Nothing survives — e.g. a silent video sent to an audio-only
+  /// container. FFmpeg would fall back to guessing its own stream
+  /// selection here, so this has to be refused rather than run.
+  bool get keepsNothing => keptCount == 0;
 
   bool get isPureRemux => actions
       .where((a) => a.kind != StreamActionKind.drop)

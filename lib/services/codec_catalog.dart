@@ -30,6 +30,19 @@ class CodecInfo {
   /// Sort order: popularity and compatibility first.
   final int rank;
 
+  /// Most channels this encoder accepts; sources with more are
+  /// downmixed. 0 means no limit worth enforcing.
+  final int maxChannels;
+
+  /// The encoder only accepts specific frame sizes, rates or bitrates
+  /// (broadcast formats like DNxHD and DV), so it cannot be offered for
+  /// arbitrary input. Such a codec can still be *copied*.
+  final bool encodeRestricted;
+
+  /// FFmpeg marks the encoder experimental and refuses without
+  /// -strict -2.
+  final bool experimental;
+
   const CodecInfo({
     required this.id,
     required this.label,
@@ -45,6 +58,9 @@ class CodecInfo {
     this.defaultKbps = 0,
     this.lossless = false,
     this.rank = 500,
+    this.maxChannels = 0,
+    this.encodeRestricted = false,
+    this.experimental = false,
   });
 
   String get encoder => encoders.first;
@@ -188,6 +204,7 @@ const _video = <CodecInfo>[
   ),
   CodecInfo(
     id: 'dnxhd', label: 'DNxHD / DNxHR', kind: 'video', rank: 13,
+    encodeRestricted: true,
     shortDescription: 'Avid editing master, very large files',
     description:
         'Avid\'s editing intermediate, the DNx equivalent of ProRes. Great for editing, wasteful for delivery.',
@@ -260,6 +277,7 @@ const _video = <CodecInfo>[
   ),
   CodecInfo(
     id: 'dvvideo', label: 'DV', kind: 'video', rank: 22,
+    encodeRestricted: true,
     shortDescription: 'camcorder tape format, fixed bitrate',
     description:
         'The MiniDV camcorder format. Fixed ~25 Mbps, so quality settings do nothing — useful for tape workflows.',
@@ -276,6 +294,7 @@ const _video = <CodecInfo>[
   ),
   CodecInfo(
     id: 'rawvideo', label: 'Raw video', kind: 'video', rank: 40,
+    encodeRestricted: true,
     shortDescription: 'uncompressed, colossal files',
     description:
         'No compression at all. Perfect fidelity and gigantic files — normally only used as a pipe format.',
@@ -306,7 +325,7 @@ const _audio = <CodecInfo>[
     defaultKbps: 128,
   ),
   CodecInfo(
-    id: 'mp3', label: 'MP3', kind: 'audio', rank: 3,
+    id: 'mp3', maxChannels: 2, label: 'MP3', kind: 'audio', rank: 3,
     shortDescription: 'universal, slightly dated',
     description:
         'Plays literally everywhere. Slightly worse quality per megabyte than AAC or Opus.',
@@ -371,6 +390,7 @@ const _audio = <CodecInfo>[
   ),
   CodecInfo(
     id: 'truehd', label: 'Dolby TrueHD', kind: 'audio', rank: 12,
+    experimental: true,
     shortDescription: 'lossless surround for Blu-ray',
     description:
         'Lossless multichannel audio used on Blu-ray. Very large; only worth keeping for home-cinema setups.',
@@ -386,7 +406,7 @@ const _audio = <CodecInfo>[
     lossless: true,
   ),
   CodecInfo(
-    id: 'wmav2', label: 'Windows Media Audio', kind: 'audio', rank: 14,
+    id: 'wmav2', maxChannels: 2, label: 'Windows Media Audio', kind: 'audio', rank: 14,
     shortDescription: 'legacy Windows audio',
     description:
         'Microsoft\'s legacy audio codec. Only worth choosing for old Windows-only players.',
@@ -394,7 +414,7 @@ const _audio = <CodecInfo>[
     defaultKbps: 192,
   ),
   CodecInfo(
-    id: 'mp2', label: 'MP2', kind: 'audio', rank: 15,
+    id: 'mp2', maxChannels: 2, label: 'MP2', kind: 'audio', rank: 15,
     shortDescription: 'broadcast standard, predates MP3',
     description:
         'MPEG-1 Layer II, still used in digital broadcasting. Robust, but far less efficient than anything modern.',

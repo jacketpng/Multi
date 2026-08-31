@@ -1075,6 +1075,74 @@ Default=1
       expect(plan.settings.hwAccel, isFalse);
     });
 
+    test('a size cap pays for the real audio, not a guessed default', () {
+      // A copied AC-3 track at 640 kbps costs far more than the 128 kbps
+      // a naive default would assume; the video budget has to shrink to
+      // match or the file blows through the cap.
+      final input = ProbeResult(
+        path: '/tmp/in.mkv',
+        container: 'matroska',
+        durationSeconds: 600, // 10 minutes
+        streams: [
+          StreamInfo(
+              index: 0, type: 'video', codec: 'theora',
+              width: 1920, height: 1080, fps: 30),
+          StreamInfo(
+              index: 1, type: 'audio', codec: 'ac3',
+              bitRate: 640000, channels: 6, sampleRate: 48000),
+        ],
+      );
+      final target = spec('mkv');
+      final plan = planner.plan(input, target);
+      // AC-3 is allowed in MKV, so it is copied at its own 640 kbps.
+      expect(plan.actions[1].kind, StreamActionKind.copy);
+      expect(planner.audioBitsPerSecond(plan), 640000);
+
+      // A cap only means anything when the video is re-encoded: a copied
+      // stream keeps whatever size it already has.
+      plan.selection[0] = 'h264';
+      plan.settings.sizeCapMb = 100;
+      planner.recompute(plan, target);
+      final vbps = planner.videoBitrateForSizeCap(plan)!;
+
+      // The whole file must land under the cap, audio included.
+      final totalBytes = (vbps + 640000) * 600 / 8;
+      expect(totalBytes, lessThan(100 * 1000 * 1000));
+      expect(totalBytes, greaterThan(90 * 1000 * 1000));
+
+      // And the estimate shown to the user agrees with the cap.
+      expect(plan.estimatedTotalBytes!, lessThan(100 * 1000 * 1000));
+
+      // Dropping the audio frees its whole budget for video.
+      plan.selection[1] = 'drop';
+      planner.recompute(plan, target);
+      expect(planner.audioBitsPerSecond(plan), 0);
+      expect(planner.videoBitrateForSizeCap(plan)!, greaterThan(vbps));
+    });
+
+    test('a transcoded track is costed at its target bitrate', () {
+      final input = ProbeResult(
+        path: '/tmp/in.mkv',
+        container: 'matroska',
+        durationSeconds: 100,
+        streams: [
+          StreamInfo(
+              index: 0, type: 'video', codec: 'theora',
+              width: 1280, height: 720, fps: 30),
+          StreamInfo(
+              index: 1, type: 'audio', codec: 'flac',
+              bitRate: 900000, channels: 2, sampleRate: 48000),
+        ],
+      );
+      // FLAC cannot go in WebM, so it is re-encoded to Opus and should
+      // be costed at the Opus bitrate, not the FLAC one.
+      final plan = planner.plan(input, spec('webm'));
+      expect(plan.actions[1].kind, StreamActionKind.transcode);
+      plan.settings.audioKbps = 128;
+      planner.recompute(plan, spec('webm'));
+      expect(planner.audioBitsPerSecond(plan), 128000);
+    });
+
     test('a size cap turns into a bitrate that fits', () {
       // 25 MB over 60s, minus 128 kbps of audio.
       final bps = ConvertPlanner.bitrateForSizeCap(25, 60, 128);
@@ -1114,6 +1182,45 @@ Default=1
       plan.settings.filters.scale = '640:-2';
       planner.recompute(plan, spec('mp4'));
       expect(plan.actions[0].estimatedBytes!, lessThan(before ~/ 2));
+    });
+
+    test('constant-quality estimates track the source, not a constant', () {
+      // Measured against real x264 encodes: a bits-per-pixel constant
+      // predicted 15.6 MB for a clip that actually encoded to 3.1 MB,
+      // because it cannot know how complex the picture is. Anchoring on
+      // the source bitrate brings it within about a third.
+      ProbeResult clip(int bitRate) => ProbeResult(
+            path: '/tmp/in.mkv',
+            container: 'matroska',
+            durationSeconds: 20,
+            streams: [
+              StreamInfo(
+                  index: 0, type: 'video', codec: 'h264',
+                  width: 1920, height: 1080, fps: 30, bitRate: bitRate),
+            ],
+          );
+
+      // Low-complexity source: 0.80 Mbps in, really encodes to ~3.1 MB.
+      final quiet = planner.plan(clip(800000), spec('webm'));
+      quiet.selection[0] = 'h264';
+      quiet.settings.crf = 20;
+      planner.recompute(quiet, spec('webm'));
+      final quietMb = quiet.actions[0].estimatedBytes! / 1e6;
+      expect(quietMb, lessThan(6), reason: 'the old model said 15.6 MB');
+      expect(quietMb, greaterThan(1));
+
+      // High-complexity source: 8.67 Mbps in, really ~18.4 MB.
+      final busy = planner.plan(clip(8670000), spec('webm'));
+      busy.selection[0] = 'h264';
+      busy.settings.crf = 20;
+      planner.recompute(busy, spec('webm'));
+      final busyMb = busy.actions[0].estimatedBytes! / 1e6;
+      expect(busyMb, greaterThan(12));
+      expect(busyMb, lessThan(30));
+
+      // Complex footage must estimate far larger than simple footage at
+      // the same settings — the whole point of reading the source.
+      expect(busyMb / quietMb, greaterThan(5));
     });
 
     test('quality auto-pick lands near the original size', () {

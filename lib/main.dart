@@ -15,9 +15,12 @@ void main() {
   final downloads = DownloadManager(tools);
   final converts = ConvertManager(tools)..settings = settings;
 
+  // A finished download hands its files to the Convert page rather than
+  // starting a conversion behind the user's back: they get the same
+  // plan, codec choices and size estimates as any other conversion.
   downloads.onConvertRequested = (files, containerId) {
     for (final f in files) {
-      converts.enqueueByPath(f, containerId);
+      converts.queueFromDownload(f, containerId);
     }
   };
 

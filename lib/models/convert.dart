@@ -188,9 +188,16 @@ class TranscodeSettings {
   /// Use a hardware encoder when one is available for the codec.
   bool hwAccel = false;
 
+  /// True once the user has flipped [hwAccel] themselves, after which
+  /// Multi stops re-deciding it for them.
+  bool hwAccelUserSet = false;
+
   /// Keep the output under this many megabytes, by deriving a bitrate
   /// from the duration. null = no cap.
   int? sizeCapMb;
+
+  /// Remove the source file once the conversion succeeds.
+  bool deleteSourceWhenDone = false;
 
   final VideoFilters filters = VideoFilters();
 }
@@ -207,6 +214,13 @@ class ConvertPlan {
 
   /// Filled by the planner every time selection/settings change.
   List<StreamAction> actions = [];
+
+  /// Whether hardware encoding should be chosen automatically when the
+  /// machine supports the codec in play (Settings > Converting).
+  bool preferHardware = true;
+
+  /// Where the output goes; null means beside the source file.
+  String? outputDir;
 
   ConvertPlan({
     required this.input,

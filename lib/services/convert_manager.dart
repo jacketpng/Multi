@@ -27,6 +27,24 @@ class ConvertManager extends ChangeNotifier {
   /// Saved defaults, injected from main.dart.
   Settings? settings;
 
+  /// Files a finished download handed over, waiting for the Convert
+  /// page to open them with the full plan UI. Each carries the target
+  /// container the download asked for.
+  final List<({String path, String containerId})> pendingFromDownloads = [];
+
+  void queueFromDownload(String path, String containerId) {
+    if (pendingFromDownloads.any((e) => e.path == path)) return;
+    pendingFromDownloads.add((path: path, containerId: containerId));
+    notifyListeners();
+  }
+
+  ({String path, String containerId})? takePendingFromDownload() {
+    if (pendingFromDownloads.isEmpty) return null;
+    final next = pendingFromDownloads.removeAt(0);
+    notifyListeners();
+    return next;
+  }
+
   ConvertManager(this.tools) {
     // ffmpeg may not be resolved yet when the UI first asks for
     // detection; retry whenever the tool manager reports progress.
@@ -116,8 +134,9 @@ class ConvertManager extends ChangeNotifier {
     }
   }
 
-  String outputPathFor(ProbeResult input, ContainerSpec target) {
-    final dir = p.dirname(input.path);
+  String outputPathFor(ProbeResult input, ContainerSpec target,
+      {String? outputDir}) {
+    final dir = outputDir ?? p.dirname(input.path);
     final base = p.basenameWithoutExtension(input.path);
     var candidate = p.join(dir, '$base.${target.extension}');
     var n = 1;
@@ -156,7 +175,7 @@ class ConvertManager extends ChangeNotifier {
   }
 
   ConvertJob enqueue(ConvertPlan plan, ContainerSpec target) {
-    final out = outputPathFor(plan.input, target);
+    final out = outputPathFor(plan.input, target, outputDir: plan.outputDir);
     final job = ConvertJob(
       id: _nextId++,
       plan: plan,
@@ -296,6 +315,23 @@ class ConvertManager extends ChangeNotifier {
           final size = await File(job.outputPath).length();
           line += ' (${_human(size)})';
         } catch (_) {}
+        // Only ever delete the source after the output exists and is
+        // not the source itself, so a failed or in-place conversion can
+        // never destroy the original.
+        if (job.plan.settings.deleteSourceWhenDone) {
+          final src = File(job.plan.input.path);
+          final out = File(job.outputPath);
+          try {
+            if (await out.exists() &&
+                await out.length() > 0 &&
+                !p.equals(out.path, src.path)) {
+              await src.delete();
+              line += ' · original deleted';
+            }
+          } catch (e) {
+            line += ' · could not delete the original: $e';
+          }
+        }
         job.statusLine = line;
       } else {
         job.status = JobStatus.failed;

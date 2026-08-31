@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:multi/models/convert.dart';
 import 'package:multi/models/download.dart';
 import 'package:multi/services/browser_profiles.dart';
+import 'package:multi/services/convert_manager.dart';
 import 'package:multi/services/convert_planner.dart';
 import 'package:multi/services/download_manager.dart';
 import 'package:multi/services/link_scraper.dart';
@@ -371,6 +372,37 @@ void main() {
       expect(t.progress, closeTo((0.50 + 1.0) / 4, 0.001));
       expect(t.statusLine, contains('1/4 files'));
       expect(t.partsDone, 1);
+    });
+  });
+
+  group('convert-after-download handoff', () {
+    test('finished downloads queue for the Convert page, not a blind job',
+        () {
+      final cm = ConvertManager(ToolManager());
+      cm.queueFromDownload('/out/a.webm', 'mp4');
+      cm.queueFromDownload('/out/b.webm', 'mkv');
+      // The same file twice must not queue twice.
+      cm.queueFromDownload('/out/a.webm', 'mp4');
+      expect(cm.pendingFromDownloads.length, 2);
+      // No job is started behind the user's back.
+      expect(cm.jobs, isEmpty);
+
+      final first = cm.takePendingFromDownload();
+      expect(first!.path, '/out/a.webm');
+      expect(first.containerId, 'mp4');
+      expect(cm.pendingFromDownloads.length, 1);
+      cm.takePendingFromDownload();
+      expect(cm.takePendingFromDownload(), isNull);
+    });
+
+    test('the output directory overrides where the file lands', () {
+      final cm = ConvertManager(ToolManager());
+      final input = ProbeResult(
+          path: '/src/clip.mkv', container: 'matroska', streams: []);
+      final target = containerSpecs.firstWhere((c) => c.id == 'mp4');
+      expect(cm.outputPathFor(input, target), '/src/clip.mp4');
+      expect(cm.outputPathFor(input, target, outputDir: '/elsewhere'),
+          '/elsewhere/clip.mp4');
     });
   });
 
@@ -959,6 +991,88 @@ Default=1
       const vt = EncoderInventory(
           encoders: {'h264_videotoolbox'}, hwFamilies: ['videotoolbox']);
       expect(planner.qualityScale('h264', st, vt).$4, isFalse);
+    });
+
+    test('hardware turns on when the codec changes, not just at first', () {
+      // The bug: the hardware default was applied once when the plan was
+      // built, so switching a stream from Copy to a codec afterwards
+      // left hardware encoding off even though the machine supported it.
+      const hw = EncoderInventory(
+          encoders: {'h264_vaapi', 'libx264', 'libx265'},
+          hwFamilies: ['vaapi']);
+      final input = ProbeResult(
+        path: '/tmp/in.mp4',
+        container: 'mp4',
+        durationSeconds: 30,
+        streams: [
+          StreamInfo(
+              index: 0, type: 'video', codec: 'h264',
+              width: 1920, height: 1080, fps: 30),
+        ],
+      );
+      // H.264 into MP4 is a copy, so nothing is being encoded yet.
+      final plan = planner.plan(input, spec('mp4'), inventory: hw);
+      expect(plan.actions[0].kind, StreamActionKind.copy);
+      expect(plan.settings.hwAccel, isFalse);
+
+      // Now force a re-encode: hardware must switch itself on.
+      plan.selection[0] = 'h264';
+      planner.recompute(plan, spec('mp4'), hw);
+      expect(plan.settings.hwAccel, isTrue,
+          reason: 'a hardware encoder exists for h264');
+
+      // A codec with no hardware encoder here turns it back off.
+      plan.selection[0] = 'hevc';
+      planner.recompute(plan, spec('mp4'), hw);
+      expect(plan.settings.hwAccel, isFalse);
+
+      // Going back to copy also turns it off.
+      plan.selection[0] = 'h264';
+      planner.recompute(plan, spec('mp4'), hw);
+      expect(plan.settings.hwAccel, isTrue);
+      plan.selection[0] = 'copy';
+      planner.recompute(plan, spec('mp4'), hw);
+      expect(plan.settings.hwAccel, isFalse);
+    });
+
+    test('an explicit hardware choice is never overridden', () {
+      const hw = EncoderInventory(
+          encoders: {'h264_vaapi', 'libx264'}, hwFamilies: ['vaapi']);
+      final input = ProbeResult(
+        path: '/tmp/in.mkv',
+        container: 'matroska',
+        durationSeconds: 30,
+        streams: [
+          StreamInfo(
+              index: 0, type: 'video', codec: 'theora',
+              width: 1280, height: 720, fps: 30),
+        ],
+      );
+      final plan = planner.plan(input, spec('mp4'), inventory: hw);
+      expect(plan.settings.hwAccel, isTrue);
+      // The user turns it off; re-planning must respect that.
+      plan.settings.hwAccel = false;
+      plan.settings.hwAccelUserSet = true;
+      planner.recompute(plan, spec('mp4'), hw);
+      expect(plan.settings.hwAccel, isFalse);
+    });
+
+    test('the settings default can disable hardware entirely', () {
+      const hw = EncoderInventory(
+          encoders: {'h264_vaapi', 'libx264'}, hwFamilies: ['vaapi']);
+      final input = ProbeResult(
+        path: '/tmp/in.mkv',
+        container: 'matroska',
+        durationSeconds: 10,
+        streams: [
+          StreamInfo(
+              index: 0, type: 'video', codec: 'theora',
+              width: 640, height: 480, fps: 30),
+        ],
+      );
+      final plan = planner.plan(input, spec('mp4'),
+          inventory: hw, preferHardware: false);
+      expect(plan.settings.hwAccel, isFalse);
     });
 
     test('a size cap turns into a bitrate that fits', () {

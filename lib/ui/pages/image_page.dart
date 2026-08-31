@@ -1,3 +1,4 @@
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -17,6 +18,12 @@ class ImagePage extends StatefulWidget {
 class _ImagePageState extends State<ImagePage> {
   final _settings = ImageSettings();
   final _maxDimController = TextEditingController();
+  bool _dragging = false;
+
+  static const _imageExtensions = {
+    'jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif',
+    'heic', 'heif', 'svg', 'psd', 'ico', 'jxl',
+  };
 
   Future<void> _pickFiles() async {
     final files = await openFiles(acceptedTypeGroups: [
@@ -38,6 +45,50 @@ class _ImagePageState extends State<ImagePage> {
 
   @override
   Widget build(BuildContext context) {
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragExited: (_) => setState(() => _dragging = false),
+      onDragDone: (detail) {
+        setState(() => _dragging = false);
+        final paths = detail.files
+            .map((f) => f.path)
+            .where((path) => _imageExtensions.contains(
+                path.split('.').last.toLowerCase()))
+            .toList();
+        if (paths.isEmpty) return;
+        final svc = context.read<ImageService>();
+        svc.addFiles(paths);
+        svc.planAll(_settings);
+      },
+      child: Stack(
+        children: [
+          _body(context),
+          if (_dragging)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.12),
+                  child: Center(
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text('Drop images to add them',
+                            style: Theme.of(context).textTheme.titleMedium),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context) {
     final svc = context.watch<ImageService>();
     final fmt =
         imageFormats.firstWhere((f) => f.id == _settings.targetFormat);
@@ -61,6 +112,12 @@ class _ImagePageState extends State<ImagePage> {
               icon: const Icon(Icons.add_photo_alternate_outlined),
               label: const Text('Add images'),
             ),
+            const SizedBox(width: 10),
+            Text('or drop them here',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: Theme.of(context).colorScheme.outline)),
             const SizedBox(width: 12),
             if (svc.items.any((i) => i.status == JobStatus.done))
               TextButton(

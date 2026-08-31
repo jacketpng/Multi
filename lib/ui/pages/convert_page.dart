@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -21,18 +24,71 @@ class _ConvertPageState extends State<ConvertPage> {
   ConvertPlan? _plan;
   String? _error;
   bool _probing = false;
+  bool _dragging = false;
+
+  /// Set when the file arrived from a finished download, so the page can
+  /// say where it came from and offer to clean it up afterwards.
+  bool _fromDownload = false;
 
   @override
   void initState() {
     super.initState();
-    // Detect hardware encoders early so the toggle is accurate.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ConvertManager>().ensureHwDetected();
+      final cm = context.read<ConvertManager>();
+      // Detect hardware encoders early so the toggle is accurate.
+      cm.ensureHwDetected();
+      _takeDownloadHandoff();
     });
   }
 
-  Future<void> _pickFile() async {
+  /// Open a file a finished download handed over, with the same plan UI
+  /// as any other conversion.
+  void _takeDownloadHandoff() {
     final cm = context.read<ConvertManager>();
+    if (_input != null || _probing) return;
+    final next = cm.takePendingFromDownload();
+    if (next == null) return;
+    final target = containerSpecs.firstWhere((c) => c.id == next.containerId,
+        orElse: () => containerSpecs.first);
+    _load(next.path, preselect: target, fromDownload: true);
+  }
+
+  /// Probe a file and build its plan.
+  Future<void> _load(String path,
+      {ContainerSpec? preselect, bool fromDownload = false}) async {
+    final cm = context.read<ConvertManager>();
+    setState(() {
+      _probing = true;
+      _error = null;
+      _input = null;
+      _plan = null;
+      _target = null;
+      _fromDownload = fromDownload;
+    });
+    try {
+      final probe = await cm.planner.probe(path);
+      if (!mounted) return;
+      setState(() {
+        _input = probe;
+        _probing = false;
+      });
+      if (preselect != null) _selectTarget(preselect);
+      // Files that arrived from a download are throwaway originals once
+      // converted, which is the whole point of asking to convert them.
+      if (fromDownload && _plan != null) {
+        _plan!.settings.deleteSourceWhenDone = true;
+        _recompute();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _probing = false;
+      });
+    }
+  }
+
+  Future<void> _pickFile() async {
     final file = await openFile(acceptedTypeGroups: [
       const XTypeGroup(label: 'Media', extensions: [
         'mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'ts', 'm2ts', 'wmv',
@@ -40,25 +96,7 @@ class _ConvertPageState extends State<ConvertPage> {
       ])
     ]);
     if (file == null || !mounted) return;
-    setState(() {
-      _probing = true;
-      _error = null;
-      _input = null;
-      _plan = null;
-      _target = null;
-    });
-    try {
-      final probe = await cm.planner.probe(file.path);
-      setState(() {
-        _input = probe;
-        _probing = false;
-      });
-    } catch (e) {
-      setState(() {
-        _error = '$e';
-        _probing = false;
-      });
-    }
+    await _load(file.path);
   }
 
   void _selectTarget(ContainerSpec spec) {
@@ -76,9 +114,72 @@ class _ConvertPageState extends State<ConvertPage> {
     setState(() {});
   }
 
+  static const _mediaExtensions = {
+    'mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'ts', 'm2ts', 'wmv', 'm4v',
+    'mpg', 'mpeg', '3gp', 'ogv', 'mp3', 'm4a', 'flac', 'opus', 'ogg',
+    'wav', 'aac', 'wma', 'gif', 'weba',
+  };
+
   @override
   Widget build(BuildContext context) {
     final cm = context.watch<ConvertManager>();
+    // Files handed over by a download while this page was off-screen.
+    if (cm.pendingFromDownloads.isNotEmpty && _input == null && !_probing) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _takeDownloadHandoff());
+    }
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragExited: (_) => setState(() => _dragging = false),
+      onDragDone: (detail) {
+        setState(() => _dragging = false);
+        final file = detail.files.firstWhere(
+            (f) => _mediaExtensions
+                .contains(p.extension(f.path).replaceFirst('.', '').toLowerCase()),
+            orElse: () => detail.files.isEmpty
+                ? throw StateError('no files')
+                : detail.files.first);
+        _load(file.path);
+      },
+      child: Stack(
+        children: [
+          _body(context, cm),
+          if (_dragging)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.12),
+                  child: Center(
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.file_download_outlined,
+                                size: 40,
+                                color: Theme.of(context).colorScheme.primary),
+                            const SizedBox(height: 8),
+                            Text('Drop a media file to convert it',
+                                style:
+                                    Theme.of(context).textTheme.titleMedium),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context, ConvertManager cm) {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -99,6 +200,12 @@ class _ConvertPageState extends State<ConvertPage> {
               icon: const Icon(Icons.video_file_outlined),
               label: const Text('Choose a file'),
             ),
+            const SizedBox(width: 10),
+            Text('or drop one anywhere on this page',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: Theme.of(context).colorScheme.outline)),
             const SizedBox(width: 12),
             if (_probing) const CircularProgressIndicator.adaptive(),
             if (_input != null)
@@ -117,6 +224,24 @@ class _ConvertPageState extends State<ConvertPage> {
             padding: const EdgeInsets.only(top: 12),
             child: Text(_error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          ),
+        if (_fromDownload && _input != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Card(
+              color: Theme.of(context)
+                  .colorScheme
+                  .tertiaryContainer
+                  .withValues(alpha: 0.4),
+              child: ListTile(
+                dense: true,
+                leading: const Icon(Icons.download_done, size: 20),
+                title: const Text('Just downloaded'),
+                subtitle: const Text(
+                    'Set up the conversion below, then press Convert. The '
+                    'downloaded original is deleted once it succeeds.'),
+              ),
+            ),
           ),
         if (_input != null) ...[
           const SizedBox(height: 20),
@@ -151,6 +276,13 @@ class _ConvertPageState extends State<ConvertPage> {
             inventory: cm.inventory,
             onChanged: _recompute,
           ),
+          const SizedBox(height: 12),
+          _OutputCard(
+            plan: _plan!,
+            target: _target!,
+            sourcePath: _input!.path,
+            onChanged: () => setState(() {}),
+          ),
           const SizedBox(height: 16),
           Align(
             alignment: Alignment.centerLeft,
@@ -161,6 +293,7 @@ class _ConvertPageState extends State<ConvertPage> {
                   _plan = null;
                   _target = null;
                   _input = null;
+                  _fromDownload = false;
                 });
               },
               icon: Icon(
@@ -737,6 +870,9 @@ class _TranscodeSettingsPanel extends StatelessWidget {
                 ? null
                 : (v) {
                     st.hwAccel = v;
+                    // Remember the choice, so re-planning stops
+                    // overriding it.
+                    st.hwAccelUserSet = true;
                     st.crf = null; // the quality scale changes with it
                     final fam = inventory.hwFamilyFor(codecId);
                     if (v && fam != null && !fam.supportsConstantQuality) {
@@ -1013,6 +1149,90 @@ class _FiltersSection extends StatelessWidget {
           },
         ),
       ],
+    );
+  }
+}
+
+/// Where the converted file lands, and whether the source survives.
+class _OutputCard extends StatelessWidget {
+  final ConvertPlan plan;
+  final ContainerSpec target;
+  final String sourcePath;
+  final VoidCallback onChanged;
+  const _OutputCard({
+    required this.plan,
+    required this.target,
+    required this.sourcePath,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final dir = plan.outputDir ?? p.dirname(sourcePath);
+    final name =
+        '${p.basenameWithoutExtension(sourcePath)}.${target.extension}';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.save_alt, size: 18, color: cs.primary),
+                const SizedBox(width: 8),
+                Text('Save to', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text('$dir${Platform.pathSeparator}$name',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: cs.outline)),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    final chosen = await getDirectoryPath();
+                    if (chosen == null) return;
+                    plan.outputDir = chosen;
+                    onChanged();
+                  },
+                  child: const Text('Change…'),
+                ),
+                if (plan.outputDir != null)
+                  TextButton(
+                    onPressed: () {
+                      plan.outputDir = null;
+                      onChanged();
+                    },
+                    child: const Text('Beside the original'),
+                  ),
+              ],
+            ),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Delete the original when it succeeds'),
+              subtitle: Text(
+                  'Only after the new file is written — a failed conversion '
+                  'never removes anything.',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: cs.outline)),
+              value: plan.settings.deleteSourceWhenDone,
+              onChanged: (v) {
+                plan.settings.deleteSourceWhenDone = v ?? false;
+                onChanged();
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

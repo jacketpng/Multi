@@ -430,24 +430,48 @@ class ConvertPlanner {
     final plan = ConvertPlan(
         input: input, targetContainer: target.id, selection: selection);
 
-    // Hardware encoding is the better default when this machine has a
-    // working encoder for the codec in play: much faster, and the user
-    // can opt out.
-    if (preferHardware) {
-      final videoCodec = selection.values.firstWhere(
-          (v) => v != 'copy' && v != 'drop' &&
-              CodecCatalog.byId(v)?.kind == 'video',
-          orElse: () => '');
-      if (videoCodec.isNotEmpty && inventory.hwEncoderFor(videoCodec) != null) {
-        plan.settings.hwAccel = true;
-        final fam = inventory.hwFamilyFor(videoCodec);
-        if (fam != null && !fam.supportsConstantQuality) {
-          plan.settings.mode = RateMode.constantBitrate;
-        }
-      }
-    }
+    plan.preferHardware = preferHardware;
     recompute(plan, target, inventory);
     return plan;
+  }
+
+  /// The codec a video stream is currently being transcoded to, or null
+  /// when no video stream is being re-encoded.
+  ///
+  /// Reads the stream type rather than looking the codec up in the
+  /// catalog, so a codec Multi has no entry for still counts.
+  String? transcodedVideoCodec(ConvertPlan plan) {
+    for (final s in plan.input.streams) {
+      if (s.type != 'video' || s.attachedPic) continue;
+      final sel = plan.selection[s.index];
+      if (sel != null && sel != 'copy' && sel != 'drop') return sel;
+    }
+    return null;
+  }
+
+  /// Turn hardware encoding on whenever this machine can actually do it
+  /// for the codec in play.
+  ///
+  /// This has to run after *every* change, not just when the plan is
+  /// first built: switching a stream from Copy to a codec, or picking a
+  /// different codec, changes whether a hardware encoder exists. An
+  /// explicit choice by the user is never overridden.
+  void applyHardwareDefault(ConvertPlan plan, EncoderInventory inventory) {
+    final st = plan.settings;
+    if (st.hwAccelUserSet) return;
+    final codec = transcodedVideoCodec(plan);
+    if (codec == null) {
+      st.hwAccel = false;
+      return;
+    }
+    final available = inventory.hwEncoderFor(codec) != null;
+    st.hwAccel = plan.preferHardware && available;
+    if (st.hwAccel) {
+      final fam = inventory.hwFamilyFor(codec);
+      if (fam != null && !fam.supportsConstantQuality) {
+        st.mode = RateMode.constantBitrate;
+      }
+    }
   }
 
   bool _isImageSub(String codec) =>
@@ -458,6 +482,7 @@ class ConvertPlanner {
   /// selection and settings. Call after any change.
   void recompute(ConvertPlan plan, ContainerSpec target,
       [EncoderInventory inventory = EncoderInventory.empty]) {
+    applyHardwareDefault(plan, inventory);
     final dur = plan.input.durationSeconds;
     plan.actions = [
       for (final s in plan.input.streams)

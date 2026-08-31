@@ -5,7 +5,9 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 import '../models/convert.dart';
+import '../models/tool.dart';
 import 'codec_catalog.dart';
+import 'ffmpeg_capabilities.dart';
 import 'tool_manager.dart';
 
 export 'codec_catalog.dart'
@@ -304,7 +306,67 @@ const hwFamiliesById = hwFamilies;
 
 class ConvertPlanner {
   final ToolManager tools;
+  late final FfmpegCapabilities capabilities =
+      FfmpegCapabilities(() => tools.pathFor(ToolId.ffmpeg) ?? 'ffmpeg');
   ConvertPlanner(this.tools);
+
+  /// Ask FFmpeg what every encoder in this plan accepts, so the
+  /// arguments can be tailored to it. Cheap after the first call.
+  Future<void> loadCapabilities(ConvertPlan plan, ContainerSpec target,
+      EncoderInventory inv) async {
+    for (final a in plan.actions) {
+      if (a.kind != StreamActionKind.transcode) continue;
+      final encoder = encoderNameFor(a.targetCodec!, plan.settings, inv);
+      if (encoder == null || plan.encoderCaps.containsKey(encoder)) continue;
+      plan.encoderCaps[encoder] = await capabilities.encoder(encoder);
+    }
+    plan.muxerCaps ??= await capabilities.muxer(muxerNameFor(target));
+  }
+
+  /// FFmpeg's muxer name for a container, which is not always its id.
+  static String muxerNameFor(ContainerSpec target) => switch (target.id) {
+        'mkv' => 'matroska',
+        'mp3' => 'mp3',
+        'm4a' => 'ipod',
+        'ac3' => 'ac3',
+        _ => target.id,
+      };
+
+  /// The encoder that will actually be used for a codec.
+  String? encoderNameFor(
+      String codecId, TranscodeSettings st, EncoderInventory inv) {
+    if (st.hwAccel) {
+      final hw = inv.hwEncoderFor(codecId);
+      if (hw != null) return hw;
+    }
+    final c = CodecCatalog.byId(codecId);
+    if (c == null) return codecId;
+    return CodecCatalog.availableEncoder(c, inv.encoders) ?? c.encoder;
+  }
+
+  /// Choose a pixel format the encoder actually lists, preferring the
+  /// source's own so nothing is converted needlessly.
+  static String? pickPixelFormat(List<String> supported, String? sourcePix) {
+    if (supported.isEmpty) return null;
+    if (sourcePix != null && supported.contains(sourcePix)) return null;
+    for (final preferred in const [
+      'yuv420p', 'yuvj420p', 'nv12', 'yuv422p', 'yuv420p10le', 'uyvy422'
+    ]) {
+      if (supported.contains(preferred)) return preferred;
+    }
+    return supported.first;
+  }
+
+  /// Nearest sample rate the encoder accepts.
+  static int? pickSampleRate(List<int> supported, int? sourceRate) {
+    if (supported.isEmpty || sourceRate == null) return null;
+    if (supported.contains(sourceRate)) return null;
+    var best = supported.first;
+    for (final r in supported) {
+      if ((r - sourceRate).abs() < (best - sourceRate).abs()) best = r;
+    }
+    return best;
+  }
 
   Future<ProbeResult> probe(String path) async {
     final ffprobe = tools.ffprobePath;
@@ -838,7 +900,14 @@ class ConvertPlanner {
         '-filter_hw_device', 'va',
       ]);
     }
+    // Trimming before -i seeks fast; -to after it is exact.
+    if ((plan.trimStart ?? '').isNotEmpty) {
+      args.addAll(['-ss', plan.trimStart!]);
+    }
     args.addAll(['-i', plan.input.path]);
+    if ((plan.trimEnd ?? '').isNotEmpty) {
+      args.addAll(['-to', plan.trimEnd!]);
+    }
 
     // A size cap overrides the rate settings with a computed bitrate.
     String? cappedBitrate;
@@ -856,10 +925,13 @@ class ConvertPlanner {
       if (a.kind == StreamActionKind.copy) {
         codecArgs.addAll(['-c:$i', 'copy']);
       } else if (a.stream.type == 'video') {
-        codecArgs.addAll(_videoArgs(
-            a.targetCodec!, i, st, inv, target, cappedBitrate, a.stream));
+        codecArgs.addAll(_videoArgs(a.targetCodec!, i, st, inv, target,
+            cappedBitrate, a.stream, plan));
+        codecArgs.addAll(_userOptions(plan, a.stream.index, i));
       } else if (a.stream.type == 'audio') {
-        codecArgs.addAll(_audioArgs(a.targetCodec!, i, st, a.stream));
+        codecArgs.addAll(_audioArgs(a.targetCodec!, i, st, a.stream,
+            inv, plan));
+        codecArgs.addAll(_userOptions(plan, a.stream.index, i));
       } else {
         codecArgs.addAll(['-c:$i', a.targetCodec ?? 'srt']);
       }
@@ -867,6 +939,9 @@ class ConvertPlanner {
     }
     args.addAll(codecArgs);
     args.addAll(target.extraOutputArgs);
+    for (final e in plan.muxerOptions.entries) {
+      if (e.value.trim().isNotEmpty) args.addAll(['-${e.key}', e.value]);
+    }
     args.addAll(['-progress', 'pipe:1', '-nostats']);
     args.add(outputPath);
     return args;
@@ -924,10 +999,11 @@ class ConvertPlanner {
 
   List<String> _videoArgs(String codecId, int i, TranscodeSettings st,
       EncoderInventory inv, ContainerSpec target, String? cappedBitrate,
-      [StreamInfo? source]) {
+      StreamInfo? source, ConvertPlan plan) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'video', codecId);
     final hwEnc = st.hwAccel ? inv.hwEncoderFor(codecId) : null;
+    final encoderName = encoderNameFor(codecId, st, inv) ?? c.encoder;
     final family = hwEnc == null ? null : hwFamilies[hwEnc.split('_').last];
     final scale = qualityScale(codecId, st, inv);
     final quality = st.crf ?? scale.$3;
@@ -948,16 +1024,25 @@ class ConvertPlanner {
       ...adapt.args,
     ];
 
-    // Sources like GIF and PNG are RGB/palettised, which the lossy video
-    // encoders reject ("Pixel format 'gbrap' is not widely supported").
-    // Planar YUV sources, including 10-bit, are left alone.
-    final srcPix = source?.pixFmt;
-    if (adapt.filters.isEmpty &&
-        !c.lossless &&
-        c.encoder != 'gif' &&
-        srcPix != null &&
-        !srcPix.startsWith('yuv')) {
-      out.addAll(['-pix_fmt:$i', 'yuv420p']);
+    // Pick a pixel format from the ones this encoder actually lists, so
+    // RGB or palettised sources (GIF, PNG) and unusual depths are
+    // converted to something it will accept — and nothing is converted
+    // when the source format is already fine.
+    if (adapt.filters.isEmpty) {
+      final caps = plan.encoderCaps[encoderName] as EncoderCaps?;
+      final chosen = caps == null
+          ? null
+          : pickPixelFormat(caps.pixelFormats, source?.pixFmt);
+      if (chosen != null) {
+        out.addAll(['-pix_fmt:$i', chosen]);
+      } else if (caps == null &&
+          !c.lossless &&
+          c.encoder != 'gif' &&
+          (source?.pixFmt != null) &&
+          !source!.pixFmt!.startsWith('yuv')) {
+        // Capabilities not loaded (a bare unit test): keep the old guard.
+        out.addAll(['-pix_fmt:$i', 'yuv420p']);
+      }
     }
 
     if (hwEnc != null && family != null) {
@@ -1043,18 +1128,36 @@ class ConvertPlanner {
     return out;
   }
 
-  List<String> _audioArgs(
-      String codecId, int i, TranscodeSettings st, StreamInfo source) {
+  /// Options the user set for one stream, in FFmpeg's own names.
+  List<String> _userOptions(ConvertPlan plan, int srcIndex, int outIndex) {
+    final opts = plan.streamOptions[srcIndex];
+    if (opts == null || opts.isEmpty) return const [];
+    return [
+      for (final e in opts.entries)
+        if (e.value.trim().isNotEmpty) ...['-${e.key}:$outIndex', e.value],
+    ];
+  }
+
+  List<String> _audioArgs(String codecId, int i, TranscodeSettings st,
+      StreamInfo source, EncoderInventory inv, ConvertPlan plan) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'audio', codecId);
     final channels = source.channels ?? 2;
     final overChannelLimit = c.maxChannels > 0 && channels > c.maxChannels;
+    final encoderName = encoderNameFor(codecId, st, inv) ?? c.encoder;
+    final caps = plan.encoderCaps[encoderName] as EncoderCaps?;
+    // Encoders publish the sample rates they accept; move to the nearest
+    // rather than letting FFmpeg refuse the job.
+    final rate = caps == null
+        ? null
+        : pickSampleRate(caps.sampleRates, source.sampleRate);
     return [
       '-c:$i', c.encoder,
       // Stereo-only encoders (MP3, MP2, WMA) reject surround outright.
       if (overChannelLimit) ...['-ac:$i', '${c.maxChannels}'],
       // FFmpeg refuses its experimental encoders without this.
       if (c.experimental) ...['-strict', '-2'],
+      if (rate != null) ...['-ar:$i', '$rate'],
       // libopus rejects layouts like 5.1(side) outright — and
       // -mapping_family does not help. Normalising the layout to one it
       // recognises does.

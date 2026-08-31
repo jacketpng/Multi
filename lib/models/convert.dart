@@ -228,6 +228,26 @@ class ConvertPlan {
   /// Where the output goes; null means beside the source file.
   String? outputDir;
 
+  /// What FFmpeg says the encoders in this plan support, keyed by
+  /// encoder name. Filled in before the arguments are built so that
+  /// pixel formats, sample rates and channel counts can be matched to
+  /// what will actually be accepted.
+  final Map<String, dynamic> encoderCaps = {};
+
+  /// Muxer capabilities for the target container.
+  dynamic muxerCaps;
+
+  /// Extra encoder options the user set, per stream index then option
+  /// name — every option FFmpeg reports for that encoder is available.
+  final Map<int, Map<String, String>> streamOptions = {};
+
+  /// Container-level options, by name.
+  final Map<String, String> muxerOptions = {};
+
+  /// Trim: keep only this part of the input.
+  String? trimStart;
+  String? trimEnd;
+
   ConvertPlan({
     required this.input,
     required this.targetContainer,
@@ -290,6 +310,10 @@ class ConvertJob {
   double? progress;
   String statusLine = '';
   final List<String> log = [];
+
+  /// Adaptations that were needed to make FFmpeg accept the job.
+  List<String> repairedWith = const [];
+
   ConvertJob({
     required this.id,
     required this.plan,

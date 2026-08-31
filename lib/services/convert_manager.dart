@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../models/convert.dart';
 import '../models/tool.dart';
 import 'convert_planner.dart';
+import 'ffmpeg_repair.dart';
 import 'settings.dart';
 import 'tool_manager.dart';
 
@@ -311,8 +312,18 @@ class ConvertManager extends ChangeNotifier {
       if (job.log.length > 300) job.log.removeRange(0, job.log.length - 300);
     });
 
-    final code = await proc.exitCode;
+    var code = await proc.exitCode;
     _procs.remove(job.id);
+
+    // If FFmpeg refused for a reason with a known remedy, apply it and
+    // run again rather than handing the user an error to research.
+    if (code != 0 && job.status != JobStatus.canceled) {
+      final repaired = await _tryRepair(job, ffmpeg);
+      if (repaired != null) {
+        code = repaired;
+      }
+    }
+
     if (job.status != JobStatus.canceled) {
       if (code == 0) {
         job.status = JobStatus.done;
@@ -339,6 +350,9 @@ class ConvertManager extends ChangeNotifier {
             line += ' · could not delete the original: $e';
           }
         }
+        if (job.repairedWith.isNotEmpty) {
+          line += ' · adapted automatically: ${job.repairedWith.join(', ')}';
+        }
         job.statusLine = line;
       } else {
         job.status = JobStatus.failed;
@@ -360,6 +374,44 @@ class ConvertManager extends ChangeNotifier {
     _running = false;
     notifyListeners();
     _pump();
+  }
+
+  /// Up to three rounds of read-the-error, fix it, try again.
+  Future<int?> _tryRepair(ConvertJob job, String ffmpeg) async {
+    var attempts = 0;
+    final applied = <String>[];
+    while (attempts < 3) {
+      final stderr = job.log.reversed.take(40).toList().reversed.join('\n');
+      final repair = FfmpegRepair.diagnose(stderr);
+      if (repair == null) return null;
+      if (applied.contains(repair.description)) return null; // no progress
+      applied.add(repair.description);
+      attempts++;
+
+      job.args
+        ..clear()
+        ..addAll(FfmpegRepair.apply(job.args, repair));
+      job.statusLine = 'Retrying — ${repair.description}';
+      job.log.add('\n== retry $attempts: ${repair.description}');
+      job.log.add('\$ ffmpeg ${job.args.join(' ')}');
+      notifyListeners();
+
+      try {
+        final r = await Process.run(ffmpeg, job.args)
+            .timeout(const Duration(minutes: 30));
+        for (final line in (r.stderr as String).split('\n')) {
+          if (line.trim().isNotEmpty) job.log.add(line);
+        }
+        if (r.exitCode == 0) {
+          job.repairedWith = List.of(applied);
+          return 0;
+        }
+      } catch (e) {
+        job.log.add('retry failed: \$e');
+        return null;
+      }
+    }
+    return null;
   }
 
   String _human(int bytes) {

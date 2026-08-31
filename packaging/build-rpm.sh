@@ -67,7 +67,12 @@ echo "==> rpmbuild"
 # rpm on Debian-family systems defaults _libdir to /usr/lib, which would
 # put an RPM's files in the wrong place for the distributions it targets.
 # Pin it so the package is identical wherever it is built.
+# --nodeps: BuildRequires are resolved against rpm's own database, which
+# on a Debian-family build host knows nothing about the apt packages that
+# actually provide these tools. The checks above already confirmed they
+# are present, and the spec keeps its BuildRequires for real RPM hosts.
 rpmbuild -bb "$PKG_DIR/$NAME.spec" \
+    --nodeps \
     --define "_version $VERSION" \
     --define "_libdir /usr/lib64" \
     --target "$ARCH"

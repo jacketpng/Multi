@@ -222,12 +222,21 @@ fails, then builds:
 
 | Job | Runner | Produces |
 |---|---|---|
-| `windows` (x64) | `windows-latest` | Inno Setup `-setup.exe` + portable `.zip` |
-| `windows` (arm64) | `windows-11-arm` | Inno Setup `-setup.exe` + portable `.zip` |
+| `linux` | `ubuntu-22.04` | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` (x86_64) |
+| `windows` | `windows-latest` | Inno Setup `-setup.exe` + portable `.zip` (x64) |
 | `macos` | `macos-14` | universal (arm64 + x86_64) `.dmg` |
 
-Linux packages are **not** built by CI — build them locally with the
-scripts above. They are quick to run and need no runner minutes.
+**No arm64 builds for Linux or Windows.** Flutter publishes no arm64 SDK
+for either platform, so a build there fails at toolchain setup with
+`Unable to determine Flutter version for ... architecture: arm64`.
+Windows on ARM runs the x64 build under emulation, and the macOS DMG is
+universal, so it is native on both Apple Silicon and Intel. The
+packaging scripts themselves are arch-aware and do produce aarch64
+packages if run on an arm machine that has a Flutter toolchain.
+
+Linux builds run on Ubuntu 22.04 deliberately: glibc is forward
+compatible, so binaries built against an older glibc run on newer
+distributions but not the reverse.
 
 If one platform fails, the release still publishes whatever the others
 produced rather than losing the lot.
@@ -238,10 +247,6 @@ build that uploads artifacts without publishing a release.
 
 Two things to know before the first run:
 
-- **Arm runners.** `windows-11-arm` is free for public repositories;
-  private repositories need a paid plan. Drop that matrix entry if it
-  does not apply to you — `fail-fast: false` plus the release job's
-  `always()` mean it failing costs only the arm64 installer.
 - **Signing.** The Windows and macOS builds are unsigned; signing needs
   certificates in repository secrets and is not set up here. macOS
   quarantines unsigned apps, so first launch needs right-click → Open.

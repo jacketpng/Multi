@@ -25,12 +25,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-14   # Apple Silicon
-            arch: arm64
-          - runner: macos-13   # Intel
-            arch: x86_64
+        # Two real dimensions (3 tools x 2 architectures = 6 jobs).
+        # 'include' only attaches the right runner to each arch; putting
+        # the runners in 'include' alone silently collapses this to one
+        # architecture, because each include entry overwrites the last.
         tool: [ffmpeg, aria2, imagemagick]
+        arch: [arm64, x86_64]
+        include:
+          - arch: arm64
+            runner: macos-14   # Apple Silicon
+          - arch: x86_64
+            runner: macos-13   # Intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

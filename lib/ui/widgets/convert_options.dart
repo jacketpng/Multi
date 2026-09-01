@@ -319,8 +319,7 @@ class AudioCard extends StatelessWidget {
                   for (final r in rates)
                     DropdownMenuItem(
                         value: r,
-                        child: Text('${(r / 1000).toStringAsFixed(
-                            r % 1000 == 0 ? 0 : 1)} kHz')),
+                        child: Text('${_kHz(r)} kHz')),
                 ],
                 onChanged: (v) {
                   st.audioSampleRate = v;
@@ -427,6 +426,10 @@ class AudioCard extends StatelessWidget {
       ),
     );
   }
+
+  /// '48' rather than '48.0', but '44.1' where it matters.
+  static String _kHz(int rate) =>
+      (rate / 1000).toStringAsFixed(rate % 1000 == 0 ? 0 : 1);
 
   static String _channelLabel(int n) => switch (n) {
         1 => 'Mono',
@@ -580,7 +583,7 @@ class _BlackBarsRowState extends State<BlackBarsRow> {
                     : const Icon(Icons.crop, size: 18),
                 label: Text(f.cropDetected
                     ? 'Check the black bars again'
-                    : 'Remove black bars'),
+                    : 'Trim the letterbox off'),
               ),
               if (_busy) ...[
                 const SizedBox(width: 12),

@@ -58,3 +58,7 @@ app.*.map.json
 /*.zip
 /*.dmg
 /packaging/*.exe
+
+# The copy catalogue and its tooling — a working file, not a build input.
+MULTI-TEXT.txt
+.multi-text/

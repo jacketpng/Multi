@@ -1,0 +1,6 @@
+# The stress harnesses drive the real FFmpeg against real media on the
+# machine they run on, so they cannot run on a build server. CI passes
+# --exclude-tags stress; locally, `flutter test` runs everything.
+tags:
+  stress:
+    description: Drives the real tools against real files on this machine.

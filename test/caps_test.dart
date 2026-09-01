@@ -1,14 +1,38 @@
 // ignore_for_file: avoid_print
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:multi/services/ffmpeg_capabilities.dart';
 import 'package:multi/services/ffmpeg_repair.dart';
 
-const ffmpeg =
-    '/home/mattpng/.local/share/dev.multi.multi/tools/ffmpeg/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg';
+/// The FFmpeg this machine would actually use: the one Multi downloaded
+/// if it is there, otherwise whatever is on the PATH. Null when there is
+/// none, in which case the capability test has nothing to ask.
+String? findFfmpeg() {
+  final home = Platform.environment['HOME'] ?? '';
+  if (home.isNotEmpty) {
+    final dir = Directory('$home/.local/share/dev.multi.multi/tools/ffmpeg');
+    if (dir.existsSync()) {
+      for (final entry in dir.listSync()) {
+        final candidate = File('${entry.path}/bin/ffmpeg');
+        if (candidate.existsSync()) return candidate.path;
+      }
+    }
+  }
+  try {
+    final r = Process.runSync('sh', ['-c', 'command -v ffmpeg']);
+    final path = (r.stdout as String).trim();
+    if (path.isNotEmpty) return path;
+  } catch (_) {}
+  return null;
+}
+
+final ffmpeg = findFfmpeg();
 
 void main() {
-  test('capabilities come from the binary that will run', () async {
-    final caps = FfmpegCapabilities(() => ffmpeg);
+  test('capabilities come from the binary that will run', skip:
+      ffmpeg == null ? 'no FFmpeg on this machine to ask' : null, () async {
+    final caps = FfmpegCapabilities(() => ffmpeg!);
     var totalOptions = 0;
     for (final name in [
       'libx264', 'libx265', 'libsvtav1', 'libvpx-vp9', 'libvpx', 'mpeg4',

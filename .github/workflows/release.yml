@@ -38,7 +38,9 @@ jobs:
           channel: stable
       - run: flutter pub get
       - run: flutter analyze
-      - run: flutter test
+      # The stress harnesses need the real tools and real media on the
+      # machine, which a runner does not have.
+      - run: flutter test --exclude-tags stress
 
   version:
     runs-on: ubuntu-latest

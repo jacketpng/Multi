@@ -22,8 +22,10 @@ import 'package:path/path.dart' as p;
 ///
 /// Everything here runs the real FFmpeg and reads the real result back.
 /// A claim that is not measured is not made.
-const work =
-    '/tmp/claude-1000/-home-mattpng-multi/5ca35dea-0dcc-43e5-87d6-1e362b3a1cad/scratchpad/feat';
+/// Scratch space for the files these tests generate. Outside the
+/// repository, and rebuilt from scratch on every run.
+final work = Platform.environment['MULTI_TEST_WORK'] ??
+    p.join(Directory.systemTemp.path, 'multi-feature-test');
 
 late ToolManager tools;
 late ConvertPlanner planner;

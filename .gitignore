@@ -47,8 +47,6 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
-# Claude Code local session settings
-.claude/
 
 # Packaging output
 /*.deb

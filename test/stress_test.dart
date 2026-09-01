@@ -20,8 +20,11 @@ import 'package:path/path.dart' as p;
 /// the FFmpeg commands it produces, and checks the results. This is the
 /// end-to-end check the unit tests cannot give: the unit tests prove the
 /// plan says the right thing, this proves FFmpeg agrees.
-const media =
-    '/tmp/claude-1000/-home-mattpng-multi/ce88ce18-cefa-4f18-829b-fe7fb146113e/scratchpad/stress';
+/// The generated corpus these tests run against — a few hundred
+/// megabytes of video, so it lives outside the repository. Point
+/// MULTI_TEST_MEDIA at it, or let it fall back to the temp directory.
+final media = Platform.environment['MULTI_TEST_MEDIA'] ??
+    p.join(Directory.systemTemp.path, 'multi-test-media');
 
 late ToolManager tools;
 late ConvertPlanner planner;

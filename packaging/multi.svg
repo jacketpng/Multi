@@ -3,11 +3,12 @@
        cap lifter swung out of them to meet in the middle as the V.
        Every stroke turns about a pin a real multitool would have. -->
   <rect width="128" height="128" rx="28" fill="#1E2230"/>
-  <g fill="#E9EDF4" stroke="#1E2230" stroke-width="2.8" stroke-linejoin="round">
+  <g fill="#E9EDF4" stroke="#1E2230" stroke-width="3.2" stroke-linejoin="round"
+     stroke-linecap="round" paint-order="stroke">
     <g transform="translate(95,29) rotate(22.5)">
       <circle r="8.5"/>
-      <path d="M -7.5,0 L 7.5,0 L 7.5,33 L 1.8,33 L 1.8,48 L 7.5,48
-               L 6.5,64 L 3,79 L -3,79 L -6,54 L -7.5,0 Z"/>
+      <path d="M -7.5,0 L 7.5,0 L 7.5,31 L 3,31 L 3,45 L 7.5,45
+               L 7.5,68 L 4.2,79 L -3.4,79 L -6.4,52 L -7.5,0 Z"/>
     </g>
     <g transform="translate(33,29) rotate(-22.5)">
       <circle r="8.5"/>

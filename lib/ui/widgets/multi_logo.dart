@@ -29,12 +29,18 @@ class MultiLogo extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-        width: size,
-        height: size,
-        child: CustomPaint(painter: _MultiLogoPainter(color, gap)),
+  Widget build(BuildContext context) => Center(
+        // Center, because a stretching parent would otherwise hand the
+        // painter a box far wider than it is tall and the mark would sit
+        // in the corner of it.
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: CustomPaint(painter: _MultiLogoPainter(color, gap)),
+        ),
       );
 }
+
 
 class _MultiLogoPainter extends CustomPainter {
   final Color color;
@@ -64,15 +70,16 @@ class _MultiLogoPainter extends CustomPainter {
   static final Path _capLifter = Path()
     ..moveTo(-7.5, 0)
     ..lineTo(7.5, 0)
-    ..lineTo(7.5, 33)
-    ..lineTo(1.8, 33)
-    ..lineTo(1.8, 48)
-    ..lineTo(7.5, 48)
-    ..lineTo(6.5, 64)
-    ..lineTo(3, 79)
-    ..lineTo(-3, 79)
-    ..lineTo(-6, 54)
+    ..lineTo(7.5, 31)
+    ..lineTo(3, 31)
+    ..lineTo(3, 45)
+    ..lineTo(7.5, 45)
+    ..lineTo(7.5, 68)
+    ..lineTo(4.2, 79)
+    ..lineTo(-3.4, 79)
+    ..lineTo(-6.4, 52)
     ..close();
+
 
   static final Path _handle = Path()
     ..addRRect(RRect.fromRectAndRadius(
@@ -80,28 +87,46 @@ class _MultiLogoPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final fill = Paint()..color = color;
+    final fill = Paint()
+      ..color = color
+      ..isAntiAlias = true;
     final separator = Paint()
       ..color = gap
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.8
-      ..strokeJoin = StrokeJoin.round;
-    final cut = Paint()..color = gap;
+      ..strokeWidth = 3.2
+
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    final cut = Paint()
+      ..color = gap
+      ..isAntiAlias = true;
 
     canvas.save();
-    canvas.scale(size.shortestSide / _grid);
+    // Square up inside whatever box we were given, then work in the
+    // 128-grid the drawing was laid out on.
+    final side = size.shortestSide;
+    canvas.translate((size.width - side) / 2, (size.height - side) / 2);
+    canvas.scale(side / _grid);
+
 
     void part(Offset pin, double degrees, Path path) {
       canvas.save();
       canvas.translate(pin.dx, pin.dy);
       canvas.rotate(_rad(degrees));
+      // Gap first, shape over it. Painting the gap afterwards would eat
+      // half its width back into the shape's own edge and leave a soft
+      // rim instead of a clean one — which is what the eye reads as bad
+      // anti-aliasing at small sizes.
+      //
       // The tang is a disc around the pin; the handle covers it later,
       // exactly as it does on the real thing.
-      canvas.drawCircle(Offset.zero, 8.5, fill);
       canvas.drawCircle(Offset.zero, 8.5, separator);
-      canvas.drawPath(path, fill);
       canvas.drawPath(path, separator);
+      canvas.drawCircle(Offset.zero, 8.5, fill);
+      canvas.drawPath(path, fill);
       canvas.restore();
+
     }
 
     part(_rightPin, _swing, _capLifter);

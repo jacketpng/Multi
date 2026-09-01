@@ -28,7 +28,8 @@ class OnboardingPage extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                MultiLogo(size: 76, color: cs.primary, gap: cs.surface),
+                MultiLogo(size: 104, color: cs.primary, gap: cs.surface),
+
                 const SizedBox(height: 12),
 
                 Text('Multi',

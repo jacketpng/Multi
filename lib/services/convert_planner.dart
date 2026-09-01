@@ -96,7 +96,7 @@ const containerSpecs = <ContainerSpec>[
     },
     videoTarget: 'h264',
     audioTarget: 'aac',
-    subtitleTarget: 'srt',
+    subtitleTarget: 'subrip',
   ),
   ContainerSpec(
     id: 'webm',
@@ -262,12 +262,16 @@ class EncoderInventory {
     final encoders = <String>{};
     final codecOf = <String, String>{};
     final kindOf = <String, String>{};
-    final line = RegExp(r'^\s*([VA])[A-Z.]{5}\s+(\S+)\s+(.*)$');
+    final line = RegExp(r'^\s*([VAS])[A-Z.]{5}\s+(\S+)\s+(.*)$');
     final codecTag = RegExp(r'\(codec ([^)]+)\)');
     for (final raw in output.split('\n')) {
       final m = line.firstMatch(raw);
       if (m == null) continue;
-      final kind = m.group(1) == 'V' ? 'video' : 'audio';
+      final kind = switch (m.group(1)) {
+        'V' => 'video',
+        'A' => 'audio',
+        _ => 'subtitle',
+      };
       final name = m.group(2)!;
       if (name == '=') continue;
       encoders.add(name);
@@ -413,6 +417,12 @@ class ConvertPlanner {
         attachedPic: ((s['disposition']
                     as Map<String, dynamic>?)?['attached_pic'] as int?) ==
             1,
+        disposition: {
+          for (final e
+              in ((s['disposition'] as Map<String, dynamic>?) ?? {}).entries)
+            if (e.value == 1) e.key,
+        },
+
       );
     }).toList();
     return ProbeResult(
@@ -431,9 +441,16 @@ class ConvertPlanner {
   /// build offers; the curated codecs come first, then the rest.
   List<CodecInfo> encodableFor(
       ContainerSpec target, String type, EncoderInventory inv) {
-    final anything =
-        type == 'video' ? target.allowsAnyVideo : target.allowsAnyAudio;
-    final allowed = type == 'video' ? target.video : target.audio;
+    final anything = switch (type) {
+      'video' => target.allowsAnyVideo,
+      'audio' => target.allowsAnyAudio,
+      _ => target.subtitle.contains('*'),
+    };
+    final allowed = switch (type) {
+      'video' => target.video,
+      'audio' => target.audio,
+      _ => target.subtitle,
+    };
 
     final out = <CodecInfo>[];
     final seen = <String>{};
@@ -483,53 +500,58 @@ class ConvertPlanner {
 
   /// Default selection: copy what fits, transcode what doesn't (to the
   /// container's default codec), drop what can't exist there.
+  /// What one stream does by default: copy when the container allows
+  /// the codec, transcode when it doesn't, drop when nothing can carry
+  /// it. Kept separate from [plan] so a stream can be put back to its
+  /// default after being filtered out by language.
+  String defaultSelectionFor(
+      ProbeResult input, StreamInfo s, ContainerSpec target) {
+    switch (s.type) {
+      case 'video':
+        if (target.audioOnly || target.video.isEmpty) return 'drop';
+        if (s.attachedPic && target.id == 'gif') return 'drop';
+        if (target.allows('video', s.codec)) return 'copy';
+        return target.videoTarget;
+      case 'audio':
+        if (target.audio.isEmpty) return 'drop';
+        if (target.singleAudioStream &&
+            input.streams.any((o) => o.type == 'audio' && o.index < s.index)) {
+          // Only the first track survives in a single-stream container.
+          return 'drop';
+        }
+        if (target.allows('audio', s.codec)) return 'copy';
+        return target.audioTarget;
+      case 'subtitle':
+        if (target.subtitle.isEmpty || _isImageSub(s.codec)) {
+          return target.allows('subtitle', s.codec) ? 'copy' : 'drop';
+        }
+        if (target.allows('subtitle', s.codec)) return 'copy';
+        return target.subtitleTarget ?? 'drop';
+      default:
+        return 'drop';
+    }
+  }
+
   ConvertPlan plan(ProbeResult input, ContainerSpec target,
       {EncoderInventory inventory = EncoderInventory.empty,
       bool preferHardware = true}) {
-    final selection = <int, String>{};
-    for (final s in input.streams) {
-      switch (s.type) {
-        case 'video':
-          if (target.audioOnly || target.video.isEmpty) {
-            selection[s.index] = 'drop';
-          } else if (s.attachedPic && target.id == 'gif') {
-            selection[s.index] = 'drop';
-          } else if (target.allows('video', s.codec)) {
-            selection[s.index] = 'copy';
-          } else {
-            selection[s.index] = target.videoTarget;
-          }
-          break;
-        case 'audio':
-          if (target.audio.isEmpty) {
-            selection[s.index] = 'drop';
-          } else if (target.singleAudioStream &&
-              input.streams.any((o) =>
-                  o.type == 'audio' && o.index < s.index)) {
-            // Only the first track survives in a single-stream container.
-            selection[s.index] = 'drop';
-          } else if (target.allows('audio', s.codec)) {
-            selection[s.index] = 'copy';
-          } else {
-            selection[s.index] = target.audioTarget;
-          }
-          break;
-        case 'subtitle':
-          if (target.subtitle.isEmpty || _isImageSub(s.codec)) {
-            selection[s.index] =
-                target.allows('subtitle', s.codec) ? 'copy' : 'drop';
-          } else if (target.allows('subtitle', s.codec)) {
-            selection[s.index] = 'copy';
-          } else {
-            selection[s.index] = target.subtitleTarget ?? 'drop';
-          }
-          break;
-        default:
-          selection[s.index] = 'drop';
-      }
-    }
+    final selection = <int, String>{
+      for (final s in input.streams)
+        s.index: defaultSelectionFor(input, s, target),
+    };
     final plan = ConvertPlan(
         input: input, targetContainer: target.id, selection: selection);
+
+    // A container's defaults become real, visible settings rather than
+    // something bolted on at the end — so they can be seen, understood
+    // and changed like anything else.
+    final extra = target.extraOutputArgs;
+    if (extra.length.isEven) {
+      for (var i = 0; i + 1 < extra.length; i += 2) {
+        plan.muxerOptions[extra[i].replaceFirst('-', '')] = extra[i + 1];
+      }
+    }
+
 
     plan.preferHardware = preferHardware;
     recompute(plan, target, inventory);
@@ -575,9 +597,73 @@ class ConvertPlanner {
     }
   }
 
-  bool _isImageSub(String codec) =>
+  bool _isImageSub(String codec) => isImageSubtitle(codec);
+
+  /// Image-based subtitles are pictures, not text: they can be copied
+  /// or burned in, but never converted to SRT.
+  static bool isImageSubtitle(String codec) =>
       const {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub'}
           .contains(codec);
+
+  /// Keep only audio and subtitle tracks in [keep], dropping the rest;
+  /// anything back in [keep] returns to what it would have done by
+  /// default. Video is never touched — it has no language.
+  ///
+  /// An empty [keep] means "keep everything", so the filter can be
+  /// cleared without having to remember the original selection.
+  void applyLanguageFilter(ConvertPlan plan, ContainerSpec target,
+      Set<String> keep, EncoderInventory inventory) {
+    for (final s in plan.input.streams) {
+      if (s.type != 'audio' && s.type != 'subtitle') continue;
+      final lang = (s.language ?? 'und').toLowerCase();
+      if (keep.isEmpty || keep.contains(lang)) {
+        if (plan.selection[s.index] == 'drop') {
+          plan.selection[s.index] =
+              defaultSelectionFor(plan.input, s, target);
+        }
+      } else {
+        plan.selection[s.index] = 'drop';
+      }
+    }
+    recompute(plan, target, inventory);
+  }
+
+  /// Position of a subtitle stream among the subtitle streams of the
+  /// input — what FFmpeg's `subtitles=…:si=N` filter counts.
+  static int subtitleOrdinal(ProbeResult input, int streamIndex) {
+    var n = 0;
+    for (final s in input.streams) {
+      if (s.type != 'subtitle') continue;
+      if (s.index == streamIndex) return n;
+      n++;
+    }
+    return 0;
+  }
+
+  /// Burning subtitles into the picture means painting them onto every
+  /// frame, so the video has to be re-encoded — a copied stream cannot
+  /// be drawn on.
+  bool burnInNeedsTranscode(ConvertPlan plan) {
+    if (plan.settings.burnInSubtitle == null) return false;
+    for (final s in plan.input.streams) {
+      if (s.type != 'video' || s.attachedPic) continue;
+      if (plan.selection[s.index] == 'copy') return true;
+    }
+    return false;
+  }
+
+  /// Two-pass has something to aim at only when a bitrate is the
+  /// target: at constant quality there is no size to hit, and hardware
+  /// encoders do their own rate control.
+  bool twoPassApplies(ConvertPlan plan, EncoderInventory inv) {
+    final codec = transcodedVideoCodec(plan);
+    if (codec == null) return false;
+    if (plan.settings.hwAccel && inv.hwEncoderFor(codec) != null) return false;
+    if (plan.settings.sizeCapMb != null) return true;
+    if (plan.settings.mode == RateMode.constantBitrate) return true;
+    // A codec with no constant-quality mode is bitrate-driven anyway.
+    return !qualityScale(codec, plan.settings, inv).$4;
+  }
 
   /// Rebuild actions (badges, reasons, size estimates) from the current
   /// selection and settings. Call after any change.
@@ -681,6 +767,9 @@ class ConvertPlanner {
     if (dur == null) return null;
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, s.type, codecId);
+    // Text subtitles are a few words per line; the format they are
+    // written in barely changes that.
+    if (s.type == 'subtitle') return (2000 * dur / 8).round();
     double rate;
     if (c.kind == 'video') {
       if (s.width == null || s.height == null) return null;
@@ -762,11 +851,40 @@ class ConvertPlanner {
           'truehd' => raw * 0.70,
           _ => raw,
         };
+      } else if (st.audioVbr) {
+        // VBR quality scales don't map to a bitrate exactly, but the
+        // published averages are close enough to estimate with.
+        rate = _vbrApproxKbps(codecId, st) * 1000.0;
       } else {
         rate = (st.audioKbps ?? c.defaultKbps) * 1000.0;
       }
+      final channels = st.audioChannels ?? s.channels ?? 2;
+      final sourceChannels = s.channels ?? 2;
+      if (channels != sourceChannels && sourceChannels > 0 && !c.lossless) {
+        rate *= channels / sourceChannels;
+      }
     }
     return (rate * dur / 8).round();
+  }
+
+  /// Rough average bitrate for a VBR quality setting, per channel pair.
+  double _vbrApproxKbps(String codecId, TranscodeSettings st) {
+    final c = CodecCatalog.byId(codecId);
+    final encoder = c?.encoder ?? codecId;
+    final vbr = CodecCatalog.vbrFor(encoder);
+    if (vbr == null) return (st.audioKbps ?? c?.defaultKbps ?? 128).toDouble();
+    final q = st.audioVbrQuality ?? vbr.def;
+    // Both scales run from "tiny" to "transparent"; interpolate across
+    // the range the encoder documents.
+    final t = vbr.lowerIsBetter
+        ? (vbr.max - q) / (vbr.max - vbr.min)
+        : (q - vbr.min) / (vbr.max - vbr.min);
+    return switch (encoder) {
+      'libmp3lame' => 65 + t * 180,
+      'libvorbis' => 45 + t * 255,
+      'libfdk_aac' => 32 + t * 130,
+      _ => 64 + t * 192,
+    };
   }
 
   /// The quality value whose estimated size lands closest to the
@@ -851,10 +969,12 @@ class ConvertPlanner {
       }
       final c = CodecCatalog.byId(a.targetCodec ?? '');
       if (c != null && c.lossless) {
-        bps += (a.stream.channels ?? 2) *
-            (a.stream.sampleRate ?? 48000) *
+        bps += (st.audioChannels ?? a.stream.channels ?? 2) *
+            (st.audioSampleRate ?? a.stream.sampleRate ?? 48000) *
             16.0 *
             0.6;
+      } else if (st.audioVbr) {
+        bps += _vbrApproxKbps(a.targetCodec ?? '', st) * 1000;
       } else {
         bps += ((st.audioKbps ?? c?.defaultKbps ?? 128) * 1000).toDouble();
       }
@@ -896,8 +1016,173 @@ class ConvertPlanner {
 
   // ---- ffmpeg argument builder ----
 
+  /// Where a two-pass encode keeps the statistics it gathers on the
+  /// first pass.
+  static String passLogFor(String outputPath) => '$outputPath.ffmpeg2pass';
+
+  /// A sink that discards everything: the first pass measures, it does
+  /// not produce a file.
+  static String get nullSink => Platform.isWindows ? 'NUL' : '/dev/null';
+
+  /// Actions in the order the user arranged them; anything they did not
+  /// mention keeps its original position at the end.
+  List<StreamAction> orderedActions(ConvertPlan plan) {
+    final order = plan.streamOrder;
+    if (order == null) return plan.actions;
+    final remaining = {for (final a in plan.actions) a.stream.index: a};
+    final out = <StreamAction>[];
+    for (final i in order) {
+      final a = remaining.remove(i);
+      if (a != null) out.add(a);
+    }
+    for (final a in plan.actions) {
+      if (remaining.containsKey(a.stream.index)) out.add(a);
+    }
+    return out;
+  }
+
+  /// A file path that survives FFmpeg's filtergraph parser.
+  ///
+  /// The graph is parsed twice — once to split it into filters, once to
+  /// split each filter's arguments — so a path has to come through
+  /// both. Quoting does that on POSIX. On Windows a quoted string
+  /// cannot contain the drive-letter colon, so it is escaped instead
+  /// and the separators are flipped to the forward slashes FFmpeg
+  /// prefers there.
+  static String filterPath(String path) {
+    if (Platform.isWindows) {
+      return path
+          .replaceAll('\\', '/')
+          .replaceAll(':', '\\:')
+          .replaceAll('[', '\\[')
+          .replaceAll(']', '\\]')
+          .replaceAll(',', '\\,')
+          .replaceAll(';', '\\;')
+          .replaceAll("'", "\\'");
+    }
+    return "'${path.replaceAll("'", "'\\''")}'";
+  }
+
+  StreamInfo? _streamAt(ConvertPlan plan, int? index) {
+    if (index == null) return null;
+    for (final s in plan.input.streams) {
+      if (s.index == index) return s;
+    }
+    return null;
+  }
+
+  /// The subtitle stream to burn in, when it is a picture rather than
+  /// text. Those cannot go through libass, so they are overlaid.
+  StreamInfo? _imageBurnIn(ConvertPlan plan) {
+    final s = _streamAt(plan, plan.settings.burnInSubtitle);
+    if (s == null) return null;
+    return isImageSubtitle(s.codec) ? s : null;
+  }
+
+  /// Burning text subtitles in is libass's job, straight from the
+  /// source file so styling and fonts come with it.
+  List<String> _textBurnIn(ConvertPlan plan) {
+    final s = _streamAt(plan, plan.settings.burnInSubtitle);
+    if (s == null || isImageSubtitle(s.codec)) return const [];
+    final si = subtitleOrdinal(plan.input, s.index);
+    return ['subtitles=${filterPath(plan.input.path)}:si=$si'];
+  }
+
+  /// Every software filter a transcoded video stream needs, in order:
+  /// the user's own, then whatever the format demands, then burned-in
+  /// subtitles last so they are drawn at the final size.
+  List<String> videoFilterChain(
+      ConvertPlan plan, ContainerSpec target, StreamAction action) {
+    final adapt = _adaptationFor(action.targetCodec!, action.stream, target);
+    return [
+      ...plan.settings.filters.chain(),
+      ...adapt.filters,
+      ..._textBurnIn(plan),
+    ];
+  }
+
+  /// GIF's palette arguments, split out so the UI can show exactly what
+  /// will run.
+  (String palettegen, String paletteuse) gifPaletteArgs(GifSettings g) {
+    final gen = [
+      'max_colors=${g.maxColors.clamp(4, 256)}',
+      'stats_mode=${g.statsMode}',
+    ].join(':');
+    final use = [
+      'dither=${g.dither}',
+      if (g.dither.startsWith('bayer')) 'bayer_scale=${g.bayerScale}',
+      if (g.diffRectangles) 'diff_mode=rectangle',
+      if (g.statsMode == 'single') 'new=1',
+    ].join(':');
+    return (gen, use);
+  }
+
+  /// A `-filter_complex` graph for the two cases a per-stream `-filter`
+  /// cannot express: a GIF palette built from this clip's own colours,
+  /// and image-based subtitles painted onto the picture.
+  ///
+  /// Returns null when the ordinary per-stream filter is enough.
+  ({String graph, String label})? complexGraph(ConvertPlan plan,
+      ContainerSpec target, StreamAction video, EncoderInventory inv) {
+    final st = plan.settings;
+    final imageSub = _imageBurnIn(plan);
+    final isGif = target.id == 'gif' && video.targetCodec == 'gif';
+    if (!isGif && imageSub == null) return null;
+
+    final hwEnc = st.hwAccel ? inv.hwEncoderFor(video.targetCodec!) : null;
+    final vaapi = hwEnc != null && hwEnc.endsWith('_vaapi');
+    final chain = videoFilterChain(plan, target, video);
+
+    final stages = <({List<String> extraInputs, String filters})>[];
+    if (chain.isNotEmpty) {
+      stages.add((extraInputs: const <String>[], filters: chain.join(',')));
+    }
+    if (imageSub != null) {
+      stages.add((
+        extraInputs: ['[0:${imageSub.index}]'],
+        filters: 'overlay',
+      ));
+    }
+    if (isGif) {
+      // Frame rate and width belong before the palette is measured, so
+      // the palette describes the frames that actually get written.
+      final g = st.gif;
+      final pre = <String>[
+        if (st.filters.fps.isEmpty && g.fps > 0) 'fps=${g.fps}',
+        if (st.filters.scale.isEmpty &&
+            g.width > 0 &&
+            (video.stream.width ?? 0) > g.width)
+          'scale=${g.width}:-1:flags=lanczos',
+      ];
+      if (pre.isNotEmpty) {
+        stages.add((extraInputs: const <String>[], filters: pre.join(',')));
+      }
+    } else if (vaapi) {
+      stages.add(
+          (extraInputs: const <String>[], filters: 'format=nv12,hwupload'));
+    }
+
+    final parts = <String>[];
+    var cur = '[0:${video.stream.index}]';
+    for (var k = 0; k < stages.length; k++) {
+      final last = k == stages.length - 1 && !isGif;
+      final out = last ? '[vout]' : '[fx$k]';
+      parts.add('$cur${stages[k].extraInputs.join()}${stages[k].filters}$out');
+      cur = out;
+    }
+    if (isGif) {
+      final (gen, use) = gifPaletteArgs(st.gif);
+      parts.add('${cur}split[gpa][gpb]');
+      parts.add('[gpa]palettegen=$gen[gpal]');
+      parts.add('[gpb][gpal]paletteuse=$use[vout]');
+    }
+    if (parts.isEmpty) return null;
+    return (graph: parts.join(';'), label: '[vout]');
+  }
+
   List<String> buildArgs(ConvertPlan plan, ContainerSpec target,
-      String outputPath, EncoderInventory inv) {
+      String outputPath, EncoderInventory inv,
+      {int pass = 0}) {
     if (plan.keepsNothing) {
       // Without a single -map, FFmpeg picks streams by its own rules and
       // writes something nobody asked for.
@@ -944,36 +1229,159 @@ class ConvertPlanner {
       if (bps != null && bps > 0) cappedBitrate = '${(bps / 1000).round()}k';
     }
 
-    var outIndex = 0;
+    final ordered = orderedActions(plan);
+
+    // One video stream may need a graph rather than a plain filter.
+    ({String graph, String label})? graph;
+    StreamAction? graphVideo;
+    for (final a in ordered) {
+      if (a.kind != StreamActionKind.transcode ||
+          a.stream.type != 'video' ||
+          a.stream.attachedPic) {
+        continue;
+      }
+      graph = complexGraph(plan, target, a, inv);
+      if (graph != null) graphVideo = a;
+      break;
+    }
+    if (graph != null) args.addAll(['-filter_complex', graph.graph]);
+
+    final maps = <String>[];
     final codecArgs = <String>[];
-    for (final a in plan.actions) {
+    final kept = <StreamAction>[];
+    var outIndex = 0;
+    for (final a in ordered) {
       if (a.kind == StreamActionKind.drop) continue;
-      args.addAll(['-map', '0:${a.stream.index}']);
+      // The measuring pass only needs the video; audio and subtitles
+      // would be encoded twice for nothing.
+      if (pass == 1 && a.stream.type != 'video') continue;
+      kept.add(a);
       final i = outIndex;
+      final onGraph = identical(a, graphVideo);
+      maps.addAll(['-map', onGraph ? graph!.label : '0:${a.stream.index}']);
       if (a.kind == StreamActionKind.copy) {
         codecArgs.addAll(['-c:$i', 'copy']);
       } else if (a.stream.type == 'video') {
         codecArgs.addAll(_videoArgs(a.targetCodec!, i, st, inv, target,
-            cappedBitrate, a.stream, plan));
+            cappedBitrate, a.stream, plan,
+            filters: videoFilterChain(plan, target, a),
+            emitFilter: !onGraph,
+            emitPixFmt: !(onGraph && target.id == 'gif')));
+        if (target.id == 'gif' && a.targetCodec == 'gif') {
+          codecArgs.addAll(['-loop', '${st.gif.loop}']);
+        }
         codecArgs.addAll(_userOptions(plan, a.stream.index, i));
       } else if (a.stream.type == 'audio') {
         codecArgs.addAll(_audioArgs(a.targetCodec!, i, st, a.stream,
             inv, plan));
         codecArgs.addAll(_userOptions(plan, a.stream.index, i));
       } else {
-        codecArgs.addAll(['-c:$i', a.targetCodec ?? 'srt']);
+        codecArgs.addAll(['-c:$i', _subtitleEncoder(a.targetCodec, inv)]);
       }
       outIndex++;
     }
+    args.addAll(maps);
     args.addAll(codecArgs);
-    args.addAll(target.extraOutputArgs);
-    for (final e in plan.muxerOptions.entries) {
-      if (e.value.trim().isNotEmpty) args.addAll(['-${e.key}', e.value]);
+    if (pass != 1) {
+      args.addAll(_metadataArgs(plan, kept));
+      // Container defaults, unless the user set the same option by hand.
+      final extra = target.extraOutputArgs;
+      if (extra.length.isEven) {
+        for (var i = 0; i + 1 < extra.length; i += 2) {
+          if (plan.muxerOptions.containsKey(extra[i].replaceFirst('-', ''))) {
+            continue;
+          }
+          args.addAll([extra[i], extra[i + 1]]);
+        }
+      } else {
+        args.addAll(extra);
+      }
+      for (final e in plan.muxerOptions.entries) {
+        if (e.value.trim().isNotEmpty) args.addAll(['-${e.key}', e.value]);
+      }
+    }
+    if (pass > 0) {
+      args.addAll(['-pass', '$pass', '-passlogfile', passLogFor(outputPath)]);
     }
     args.addAll(['-progress', 'pipe:1', '-nostats']);
-    args.add(outputPath);
+    if (pass == 1) {
+      args.addAll(['-an', '-sn', '-f', muxerNameFor(target), nullSink]);
+    } else {
+      args.add(outputPath);
+    }
     return args;
   }
+
+  /// The encoder that writes a subtitle format, by its ffprobe name.
+  String _subtitleEncoder(String? codecId, EncoderInventory inv) {
+    if (codecId == null) return 'srt';
+    final c = CodecCatalog.byId(codecId);
+    if (c == null || c.kind != 'subtitle') return codecId;
+    return CodecCatalog.availableEncoder(c, inv.encoders) ?? c.encoder;
+  }
+
+  /// Titles, languages and default/forced flags.
+  ///
+  /// "Default" is exclusive within a stream type — two default audio
+  /// tracks is not a thing — so marking one takes it away from the
+  /// others rather than leaving the player to pick between two.
+  ///
+  /// Every disposition is written out in full rather than added to what
+  /// is already there, because "make this one the default" has to be
+  /// able to *remove* a flag; the source's other flags are carried
+  /// across so nothing is lost on the way.
+  List<String> _metadataArgs(ConvertPlan plan, List<StreamAction> kept) {
+    final out = <String>[];
+    if (plan.fileTitle.trim().isNotEmpty) {
+      out.addAll(['-metadata', 'title=${plan.fileTitle.trim()}']);
+    }
+    final claimed = <String>{};
+    for (final a in kept) {
+      if (plan.streamMeta[a.stream.index]?.isDefault == true) {
+        claimed.add(a.stream.type);
+      }
+    }
+    for (var i = 0; i < kept.length; i++) {
+      final a = kept[i];
+      final m = plan.streamMeta[a.stream.index];
+      if (m != null) {
+        if (m.title.trim().isNotEmpty) {
+          out.addAll(['-metadata:s:$i', 'title=${m.title.trim()}']);
+        }
+        if (m.language.trim().isNotEmpty) {
+          out.addAll(['-metadata:s:$i', 'language=${m.language.trim()}']);
+        }
+      }
+      final source = a.stream.disposition;
+      final want = {...source};
+      switch (m?.isDefault) {
+        case true:
+          want.add('default');
+        case false:
+          want.remove('default');
+        case null:
+          break;
+      }
+      switch (m?.forced) {
+        case true:
+          want.add('forced');
+        case false:
+          want.remove('forced');
+        case null:
+          break;
+      }
+      if (claimed.contains(a.stream.type) && m?.isDefault != true) {
+        want.remove('default');
+      }
+      final unchanged =
+          want.length == source.length && want.containsAll(source);
+      if (!unchanged) {
+        out.addAll(['-disposition:$i', want.isEmpty ? '0' : want.join('+')]);
+      }
+    }
+    return out;
+  }
+
 
   /// What a rigid format needs before it will accept a frame.
   ({List<String> filters, List<String> args}) _adaptationFor(
@@ -1014,20 +1422,10 @@ class ConvertPlanner {
     }
   }
 
-  /// Filter chain for a transcoded video stream, VAAPI-aware.
-  List<String> _filterChain(TranscodeSettings st, bool vaapi,
-      {List<String> extra = const []}) {
-    final chain = [...st.filters.chain(), ...extra];
-    if (vaapi) {
-      // Software filters run before the frame is uploaded to the GPU.
-      return [...chain, 'format=nv12', 'hwupload'];
-    }
-    return chain;
-  }
-
   List<String> _videoArgs(String codecId, int i, TranscodeSettings st,
       EncoderInventory inv, ContainerSpec target, String? cappedBitrate,
-      StreamInfo? source, ConvertPlan plan) {
+      StreamInfo? source, ConvertPlan plan,
+      {List<String>? filters, bool emitFilter = true, bool emitPixFmt = true}) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'video', codecId);
     final hwEnc = st.hwAccel ? inv.hwEncoderFor(codecId) : null;
@@ -1043,12 +1441,17 @@ class ConvertPlanner {
     // Some formats only accept particular frame sizes, rates or pixel
     // layouts. Rather than refusing them, give them what they need.
     final adapt = _adaptationFor(codecId, source, target);
-    final filters = [
-      ..._filterChain(st, hwEnc != null && hwEnc.endsWith('_vaapi'),
-          extra: adapt.filters),
+    final chain = [
+      ...(filters ??
+          [...st.filters.chain(), ...adapt.filters, ..._textBurnIn(plan)]),
+      // Software filters run before the frame is uploaded to the GPU.
+      if (hwEnc != null && hwEnc.endsWith('_vaapi')) ...[
+        'format=nv12',
+        'hwupload',
+      ],
     ];
     final out = <String>[
-      if (filters.isNotEmpty) ...['-filter:$i', filters.join(',')],
+      if (emitFilter && chain.isNotEmpty) ...['-filter:$i', chain.join(',')],
       ...adapt.args,
     ];
 
@@ -1056,7 +1459,7 @@ class ConvertPlanner {
     // RGB or palettised sources (GIF, PNG) and unusual depths are
     // converted to something it will accept — and nothing is converted
     // when the source format is already fine.
-    if (adapt.filters.isEmpty) {
+    if (adapt.filters.isEmpty && emitPixFmt) {
       final caps = plan.encoderCaps[encoderName] as EncoderCaps?;
       final chosen = caps == null
           ? null
@@ -1170,32 +1573,69 @@ class ConvertPlanner {
       StreamInfo source, EncoderInventory inv, ConvertPlan plan) {
     final c = CodecCatalog.byId(codecId) ??
         CodecCatalog.generic(codecId, 'audio', codecId);
-    final channels = source.channels ?? 2;
-    final overChannelLimit = c.maxChannels > 0 && channels > c.maxChannels;
     final encoderName = encoderNameFor(codecId, st, inv) ?? c.encoder;
     final caps = plan.encoderCaps[encoderName] as EncoderCaps?;
-    // Encoders publish the sample rates they accept; move to the nearest
-    // rather than letting FFmpeg refuse the job.
-    final rate = caps == null
-        ? null
-        : pickSampleRate(caps.sampleRates, source.sampleRate);
-    return [
-      '-c:$i', c.encoder,
-      // Stereo-only encoders (MP3, MP2, WMA) reject surround outright.
-      if (overChannelLimit) ...['-ac:$i', '${c.maxChannels}'],
-      // FFmpeg refuses its experimental encoders without this.
-      if (c.experimental) ...['-strict', '-2'],
-      if (rate != null) ...['-ar:$i', '$rate'],
+
+    // Channels: the user's choice, then whatever ceiling the encoder
+    // has. Stereo-only encoders (MP3, MP2, WMA) reject surround
+    // outright, so they get a downmix rather than an error.
+    var channels = st.audioChannels ?? source.channels;
+    if (c.maxChannels > 0 && (channels ?? 0) > c.maxChannels) {
+      channels = c.maxChannels;
+    }
+    final outChannels = channels ?? source.channels ?? 2;
+
+    // Sample rate: the user's choice, moved to the nearest the encoder
+    // publishes rather than letting FFmpeg refuse the job.
+    var rate = st.audioSampleRate ?? source.sampleRate;
+    if (caps != null) {
+      final moved = pickSampleRate(caps.sampleRates, rate);
+      if (moved != null) rate = moved;
+    }
+
+    final filters = <String>[
       // libopus rejects layouts like 5.1(side) outright — and
       // -mapping_family does not help. Normalising the layout to one it
       // recognises does.
-      if (c.encoder == 'libopus' && channels > 2) ...[
-        '-filter:$i', 'aformat=channel_layouts=7.1|5.1|quad|stereo|mono',
-        '-mapping_family:$i', '1',
-      ],
-      if (!c.lossless) ...['-b:$i', '${st.audioKbps ?? c.defaultKbps}k'],
+      if (encoderName == 'libopus' && outChannels > 2)
+        'aformat=channel_layouts=7.1|5.1|quad|stereo|mono',
+      ...switch (st.normalize) {
+        AudioNormalize.loudnorm => [
+            'loudnorm=I=${_num(st.loudnessTarget)}:TP=${_num(st.truePeak)}'
+                ':LRA=${_num(st.loudnessRange)}',
+            // loudnorm works internally at 192 kHz and hands that on;
+            // most encoders refuse it, so put the rate back afterwards.
+            'aresample=${rate ?? source.sampleRate ?? 48000}',
+          ],
+        AudioNormalize.peak when st.measuredPeakDb != null => [
+            'volume=${_num(-st.measuredPeakDb!)}dB',
+          ],
+        _ => const <String>[],
+      },
+      if (st.gainDb != 0) 'volume=${_num(st.gainDb)}dB',
+    ];
+
+    final vbr = st.audioVbr ? CodecCatalog.vbrFor(encoderName) : null;
+    return [
+      '-c:$i', encoderName,
+      if (channels != null && channels != source.channels)
+        ...['-ac:$i', '$channels'],
+      // FFmpeg refuses its experimental encoders without this.
+      if (c.experimental) ...['-strict', '-2'],
+      if (rate != null && rate != source.sampleRate) ...['-ar:$i', '$rate'],
+      if (filters.isNotEmpty) ...['-filter:$i', filters.join(',')],
+      if (encoderName == 'libopus' && outChannels > 2)
+        ...['-mapping_family:$i', '1'],
+      if (!c.lossless)
+        ...(vbr != null
+            ? ['-${vbr.flag}:$i', vbr.format(st.audioVbrQuality ?? vbr.def)]
+            : ['-b:$i', '${st.audioKbps ?? c.defaultKbps}k']),
     ];
   }
+
+  /// '11' rather than '11.0' — FFmpeg accepts both, people read one.
+  static String _num(double v) =>
+      v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
 
   static String _double(String rate) {
     final n = parseBitrate(rate);

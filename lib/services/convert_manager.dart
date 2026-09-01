@@ -9,15 +9,20 @@ import '../models/convert.dart';
 import '../models/tool.dart';
 import 'convert_planner.dart';
 import 'ffmpeg_repair.dart';
+import 'media_analysis.dart';
 import 'settings.dart';
 import 'tool_manager.dart';
+
 
 /// Runs planned ffmpeg jobs sequentially and reports progress. Also
 /// discovers which hardware encoders this machine can use.
 class ConvertManager extends ChangeNotifier {
   final ToolManager tools;
   late final ConvertPlanner planner = ConvertPlanner(tools);
+  late final MediaAnalysis analysis =
+      MediaAnalysis(() => tools.pathFor(ToolId.ffmpeg) ?? 'ffmpeg');
   final List<ConvertJob> jobs = [];
+
   final Map<int, Process> _procs = {};
   int _nextId = 1;
   bool _running = false;
@@ -203,17 +208,64 @@ class ConvertManager extends ChangeNotifier {
 
   ConvertJob enqueue(ConvertPlan plan, ContainerSpec target) {
     final out = outputPathFor(plan.input, target, outputDir: plan.outputDir);
+    final twoPass = plan.settings.twoPass &&
+        planner.twoPassApplies(plan, inventory);
     final job = ConvertJob(
       id: _nextId++,
       plan: plan,
       outputPath: out,
-      args: planner.buildArgs(plan, target, out, inventory),
+      args: planner.buildArgs(plan, target, out, inventory,
+          pass: twoPass ? 1 : 0),
     );
+    job.passes = twoPass ? 2 : 1;
     jobs.insert(0, job);
     notifyListeners();
     _pump();
     return job;
   }
+
+  ContainerSpec targetOf(ConvertPlan plan) => containerSpecs.firstWhere(
+      (c) => c.id == plan.targetContainer,
+      orElse: () => containerSpecs.first);
+
+  /// Measure the black bars around the picture and put the result in
+  /// the plan's crop filter. Nothing is applied if there are none.
+  Future<CropResult?> detectCrop(ConvertPlan plan,
+      {void Function(String status)? onStatus,
+      bool Function()? isCanceled}) async {
+    final result = await analysis.detectCrop(plan.input,
+        onStatus: onStatus, isCanceled: isCanceled);
+
+    final f = plan.settings.filters;
+    if (result == null) {
+      f.cropSummary = 'FFmpeg could not read the edges of this file.';
+      f.cropDetected = false;
+      notifyListeners();
+      return null;
+    }
+    f.cropSummary = result.summary;
+    if (result.isFullFrame) {
+      f.cropDetected = false;
+      if (f.crop.isNotEmpty) f.crop = '';
+    } else {
+      f.crop = result.filterValue;
+      f.cropDetected = true;
+    }
+    planner.recompute(plan, targetOf(plan), inventory);
+    notifyListeners();
+    return result;
+  }
+
+  /// Find out how much headroom the audio has, so peak normalisation
+  /// has a real number to work from rather than a guess.
+  Future<double?> measurePeak(ConvertPlan plan,
+      {void Function(String status)? onStatus}) async {
+    final db = await analysis.measurePeak(plan.input, onStatus: onStatus);
+    plan.settings.measuredPeakDb = db;
+    notifyListeners();
+    return db;
+  }
+
 
   /// Convert-after-download entry: probe a file and enqueue it with the
   /// default remux-first plan for the given container id.
@@ -273,6 +325,105 @@ class ConvertManager extends ChangeNotifier {
     if (next != null) unawaited(_run(next));
   }
 
+  /// Run one FFmpeg invocation, streaming its -progress output into the
+  /// job so the UI can show real figures rather than a spinner.
+  Future<int> _runOnce(ConvertJob job, String ffmpeg, List<String> args,
+      double totalSeconds) async {
+    job.log.add('\$ ffmpeg ${args.join(' ')}');
+    Process proc;
+    try {
+      proc = await Process.start(ffmpeg, args);
+    } catch (e) {
+      job.statusLine = 'Failed to start: $e';
+      return -1;
+    }
+    _procs[job.id] = proc;
+
+    proc.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+      final eq = line.indexOf('=');
+      if (eq <= 0) return;
+      final key = line.substring(0, eq);
+      final value = line.substring(eq + 1).trim();
+      switch (key) {
+        // out_time_ms has always actually been microseconds.
+        case 'out_time_ms':
+        case 'out_time_us':
+          final us = double.tryParse(value) ?? 0;
+          job.outSeconds = us / 1e6;
+          if (totalSeconds > 0) {
+            final fraction = (us / (totalSeconds * 1e6)).clamp(0.0, 1.0);
+            job.progress = job.passes > 1
+                ? ((job.pass - 1) + fraction) / job.passes
+                : fraction;
+          }
+        case 'total_size':
+          job.outputBytes = int.tryParse(value);
+        case 'bitrate':
+          job.bitrate = value == 'N/A' ? null : value;
+        case 'frame':
+          job.frame = int.tryParse(value);
+        case 'speed':
+          job.speed = value == 'N/A' ? null : value;
+          final factor = double.tryParse(value.replaceAll('x', ''));
+          final done = job.outSeconds;
+          if (factor != null && factor > 0 && totalSeconds > 0 && done != null) {
+            final remainingThisPass = (totalSeconds - done).clamp(0, double.infinity);
+            final remainingPasses = job.passes - job.pass;
+            job.etaSeconds =
+                (remainingThisPass + remainingPasses * totalSeconds) / factor;
+          }
+        case 'progress':
+          break;
+      }
+      job.statusLine = _progressLine(job);
+      notifyListeners();
+    });
+    proc.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+      if (line.trim().isEmpty) return;
+      job.log.add(line);
+      if (job.log.length > 300) job.log.removeRange(0, job.log.length - 300);
+    });
+
+    final code = await proc.exitCode;
+    _procs.remove(job.id);
+    return code;
+  }
+
+  /// The one-line summary under the progress bar.
+  String _progressLine(ConvertJob job) {
+    final parts = <String>[];
+    if (job.progress != null) {
+      parts.add('${(job.progress! * 100).toStringAsFixed(0)}%');
+    }
+    parts.add(job.plan.isPureRemux ? 'remuxing' : 'converting');
+    if (job.passes > 1) parts.add('pass ${job.pass} of ${job.passes}');
+    final detail = <String>[
+      if (job.speed != null) job.speed!,
+      if (job.etaSeconds != null) '${formatDuration(job.etaSeconds!)} left',
+      if (job.bitrate != null) job.bitrate!,
+      if (job.outputBytes != null) _human(job.outputBytes!),
+    ];
+    return '${parts.join(' — ')}${detail.isEmpty ? '' : ' · ${detail.join(' · ')}'}';
+  }
+
+  /// '1:02:03', '4:07' or '12s'.
+  static String formatDuration(double seconds) {
+    if (!seconds.isFinite || seconds < 0) return '—';
+    final total = seconds.round();
+    final h = total ~/ 3600, m = (total % 3600) ~/ 60, s = total % 60;
+    if (h > 0) {
+      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    }
+    if (m > 0) return '$m:${s.toString().padLeft(2, '0')}';
+    return '${s}s';
+  }
+
   Future<void> _run(ConvertJob job) async {
     final ffmpeg = tools.pathFor(ToolId.ffmpeg);
     if (ffmpeg == null) {
@@ -284,55 +435,24 @@ class ConvertManager extends ChangeNotifier {
     _running = true;
     job.status = JobStatus.running;
     job.statusLine = 'Starting…';
+    job.pass = job.passes > 1 ? 1 : 0;
     notifyListeners();
 
-    job.log.add('\$ ffmpeg ${job.args.join(' ')}');
-    Process proc;
-    try {
-      proc = await Process.start(ffmpeg, job.args);
-    } catch (e) {
-      job.status = JobStatus.failed;
-      job.statusLine = 'Failed to start: $e';
-      _running = false;
-      notifyListeners();
-      _pump();
-      return;
+    final target = targetOf(job.plan);
+    final totalSeconds = _plannedSeconds(job.plan);
+
+    var code = await _runOnce(job, ffmpeg, job.args, totalSeconds);
+
+    // The first pass only gathers statistics; the second does the work.
+    if (code == 0 && job.passes > 1 && job.status != JobStatus.canceled) {
+      job.pass = 2;
+      job.args
+        ..clear()
+        ..addAll(planner.buildArgs(
+            job.plan, target, job.outputPath, inventory, pass: 2));
+      job.log.add('\n== pass 2 of 2');
+      code = await _runOnce(job, ffmpeg, job.args, totalSeconds);
     }
-    _procs[job.id] = proc;
-    final totalUs = (job.plan.input.durationSeconds ?? 0) * 1e6;
-
-    proc.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .listen((line) {
-      // -progress pipe:1 emits key=value lines.
-      if (line.startsWith('out_time_ms=') || line.startsWith('out_time_us=')) {
-        final us = double.tryParse(line.split('=').last) ?? 0;
-        if (totalUs > 0) {
-          job.progress = (us / totalUs).clamp(0.0, 1.0);
-          job.statusLine =
-              '${(job.progress! * 100).toStringAsFixed(0)}%${job.plan.isPureRemux ? ' — remuxing' : ' — converting'}';
-          notifyListeners();
-        }
-      } else if (line.startsWith('speed=')) {
-        final speed = line.split('=').last.trim();
-        if (speed.isNotEmpty && speed != 'N/A' && job.statusLine.contains('%')) {
-          job.statusLine = '${job.statusLine.split(' @').first} @ $speed';
-          notifyListeners();
-        }
-      }
-    });
-    proc.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())
-        .listen((line) {
-      if (line.trim().isEmpty) return;
-      job.log.add(line);
-      if (job.log.length > 300) job.log.removeRange(0, job.log.length - 300);
-    });
-
-    var code = await proc.exitCode;
-    _procs.remove(job.id);
 
     // If FFmpeg refused for a reason with a known remedy, apply it and
     // run again rather than handing the user an error to research.
@@ -347,11 +467,28 @@ class ConvertManager extends ChangeNotifier {
       if (code == 0) {
         job.status = JobStatus.done;
         job.progress = 1;
+        job.etaSeconds = null;
         var line = 'Done → ${p.basename(job.outputPath)}';
         try {
           final size = await File(job.outputPath).length();
           line += ' (${_human(size)})';
         } catch (_) {}
+        if (job.plan.extractSubtitles) {
+          try {
+            final written = await analysis.extractSubtitles(
+              job.plan.input,
+              job.plan.extractSubtitleFormat,
+              outputDir: p.dirname(job.outputPath),
+            );
+            job.sidecarFiles.addAll(written);
+            if (written.isNotEmpty) {
+              line += ' · ${written.length} subtitle '
+                  '${written.length == 1 ? 'file' : 'files'} written';
+            }
+          } catch (e) {
+            line += ' · could not write the subtitle files: $e';
+          }
+        }
         // Only ever delete the source after the output exists and is
         // not the source itself, so a failed or in-place conversion can
         // never destroy the original.
@@ -390,9 +527,34 @@ class ConvertManager extends ChangeNotifier {
         if (await f.exists()) await f.delete();
       } catch (_) {}
     }
+    await _cleanPassLogs(job);
     _running = false;
     notifyListeners();
     _pump();
+  }
+
+  /// How long the output will be, which is what progress is measured
+  /// against — a trim makes that shorter than the source.
+  double _plannedSeconds(ConvertPlan plan) {
+    final total = plan.input.durationSeconds ?? 0;
+    final start = ConvertPlanner.parseTime(plan.trimStart) ?? 0;
+    final end = ConvertPlanner.parseTime(plan.trimEnd);
+    final stop = end ?? total;
+    final span = stop - start;
+    return span > 0 ? span : total;
+  }
+
+  /// Two-pass leaves statistics files behind; they are no use to anyone
+  /// once the encode is over.
+  Future<void> _cleanPassLogs(ConvertJob job) async {
+    if (job.passes < 2) return;
+    final base = ConvertPlanner.passLogFor(job.outputPath);
+    for (final suffix in const ['-0.log', '-0.log.mbtree', '.log', '.log.mbtree']) {
+      try {
+        final f = File('$base$suffix');
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
   }
 
   /// Up to three rounds of read-the-error, fix it, try again.

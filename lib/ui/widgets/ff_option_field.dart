@@ -70,8 +70,42 @@ class FFOptionField extends StatelessWidget {
           ),
         ));
 
-      case FFOptionType.enumerated:
+      // A flags option is a set, not a choice: FFmpeg takes them joined
+      // with '+', and several are usually wanted at once.
       case FFOptionType.flags:
+        final selected = (value ?? '')
+            .split('+')
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty)
+            .toSet();
+        return row(Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: [
+            for (final c in option.choices)
+              Tooltip(
+                message: c.help,
+                child: FilterChip(
+                  label: Text(c.name),
+                  labelStyle: Theme.of(context).textTheme.labelSmall,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  selected: selected.contains(c.name),
+                  onSelected: (on) {
+                    final next = {...selected};
+                    if (on) {
+                      next.add(c.name);
+                    } else {
+                      next.remove(c.name);
+                    }
+                    onChanged(next.isEmpty ? null : '+${next.join('+')}');
+                  },
+                ),
+              ),
+          ],
+        ));
+
+      case FFOptionType.enumerated:
         return row(DropdownButton<String>(
           isExpanded: true,
           isDense: true,

@@ -13,6 +13,11 @@ class StreamInfo {
   final String? pixFmt; // e.g. yuv420p, yuv420p10le, bgra, pal8
   final bool attachedPic;
 
+  /// Disposition flags the source carries — 'default', 'forced',
+  /// 'hearing_impaired' and the rest. Kept so that changing one flag
+  /// does not quietly throw the others away.
+  final Set<String> disposition;
+
   StreamInfo({
     required this.index,
     required this.type,
@@ -27,7 +32,9 @@ class StreamInfo {
     this.bitRate,
     this.pixFmt,
     this.attachedPic = false,
+    this.disposition = const {},
   });
+
 
   String get summary {
     switch (type) {
@@ -122,6 +129,11 @@ class VideoFilters {
   String rotate = ''; // '90' | '180' | '270' | 'hflip' | 'vflip'
   String custom = ''; // raw filter chain appended verbatim
 
+  /// Set when [crop] came from FFmpeg's own cropdetect rather than
+  /// being typed in, plus a plain-language summary of what it found.
+  bool cropDetected = false;
+  String cropSummary = '';
+
   bool get isEmpty =>
       scale.isEmpty &&
       fps.isEmpty &&
@@ -170,7 +182,90 @@ class VideoFilters {
     ..grayscale = grayscale
     ..crop = crop
     ..rotate = rotate
-    ..custom = custom;
+    ..custom = custom
+    ..cropDetected = cropDetected
+    ..cropSummary = cropSummary;
+}
+
+/// How loudness is handled on transcoded audio.
+enum AudioNormalize {
+  /// Leave the levels exactly as they are.
+  none,
+
+  /// EBU R128 loudness normalisation — the broadcast/streaming standard.
+  loudnorm,
+
+  /// Raise the whole track until its loudest sample just fits, which
+  /// changes nothing else about the dynamics.
+  peak,
+}
+
+extension AudioNormalizeInfo on AudioNormalize {
+  String get label => switch (this) {
+        AudioNormalize.none => 'Leave levels alone',
+        AudioNormalize.loudnorm => 'Loudness (EBU R128)',
+        AudioNormalize.peak => 'Peak normalise',
+      };
+  String get description => switch (this) {
+        AudioNormalize.none => 'The audio keeps whatever levels it had.',
+        AudioNormalize.loudnorm =>
+          'Matches a target loudness the way streaming services do, so '
+              'this file sits at the same volume as everything else.',
+        AudioNormalize.peak =>
+          'Turns the whole track up until the loudest moment just fits. '
+              'Nothing is compressed.',
+      };
+}
+
+/// Per-stream metadata and flags written into the output.
+class StreamMeta {
+  String title = '';
+  String language = '';
+  bool? isDefault; // null = leave the source disposition alone
+  bool? forced;
+
+  bool get isEmpty =>
+      title.isEmpty && language.isEmpty && isDefault == null && forced == null;
+
+  StreamMeta clone() => StreamMeta()
+    ..title = title
+    ..language = language
+    ..isDefault = isDefault
+    ..forced = forced;
+}
+
+/// GIF is a special case: FFmpeg's plain gif encoder quantises to a
+/// fixed 256-colour web palette and the result looks dreadful. A
+/// per-file palette generated from the actual footage costs one extra
+/// filter and is dramatically better, so Multi does it by default.
+class GifSettings {
+  /// Frames per second. GIF stores delays in hundredths of a second,
+  /// so rates that do not divide 100 evenly get uneven timing.
+  int fps = 15;
+
+  /// Width in pixels; height follows the aspect ratio. 0 = keep source.
+  int width = 480;
+
+  /// palettegen stats_mode: 'diff' weights moving areas, which is
+  /// usually what matters in a clip; 'full' treats every pixel equally.
+  String statsMode = 'diff';
+
+  /// paletteuse dither. 'bayer' is small and banded, the error-diffusion
+  /// modes look better but compress worse.
+  String dither = 'bayer';
+
+  /// bayer_scale 0-5: lower is a coarser, more visible pattern that
+  /// compresses smaller.
+  int bayerScale = 5;
+
+  /// Reuse the palette between frames where the picture has not moved.
+  bool diffRectangles = true;
+
+  /// 0 = loop forever, -1 = play once.
+  int loop = 0;
+
+  /// Maximum palette size. Fewer colours, smaller file.
+  int maxColors = 256;
 }
 
 /// User-tunable transcode parameters shared by a conversion.
@@ -205,7 +300,50 @@ class TranscodeSettings {
   /// Derived by the planner, not set by the user.
   int? cappedVideoBps;
 
+  /// Encode twice, measuring on the first pass so the second can spend
+  /// the bit budget where it matters. Only meaningful at a fixed
+  /// bitrate — at constant quality there is nothing to aim at.
+  bool twoPass = false;
+
+  // ---- audio ----
+
+  /// Output sample rate in Hz; null = keep the source's (moved to the
+  /// nearest the encoder accepts, if it has to be).
+  int? audioSampleRate;
+
+  /// Output channel count; null = keep the source's.
+  int? audioChannels;
+
+  /// Use the encoder's variable-bitrate mode instead of a fixed rate.
+  bool audioVbr = false;
+
+  /// Quality on that encoder's own VBR scale; null = its default.
+  double? audioVbrQuality;
+
+  AudioNormalize normalize = AudioNormalize.none;
+
+  /// EBU R128 targets: integrated loudness (LUFS), true peak (dBTP),
+  /// loudness range (LU). The defaults are the streaming-service ones.
+  double loudnessTarget = -16;
+  double truePeak = -1.5;
+  double loudnessRange = 11;
+
+  /// Plain gain in dB, applied after any normalisation.
+  double gainDb = 0;
+
+  /// Loudest sample in the source, in dBFS, as measured by FFmpeg.
+  /// Peak normalisation needs a real measurement — there is no way to
+  /// know how much headroom a file has without looking.
+  double? measuredPeakDb;
+
+  // ---- subtitles ----
+
+  /// Source index of a subtitle stream to burn into the picture, or
+  /// null. Burning in forces the video to be re-encoded.
+  int? burnInSubtitle;
+
   final VideoFilters filters = VideoFilters();
+  final GifSettings gif = GifSettings();
 }
 
 /// A conversion being configured: per-stream selection ('copy', 'drop',
@@ -247,6 +385,33 @@ class ConvertPlan {
   /// Trim: keep only this part of the input.
   String? trimStart;
   String? trimEnd;
+
+  /// Title, language and default/forced flags per source stream index.
+  final Map<int, StreamMeta> streamMeta = {};
+
+  /// Title written into the file itself.
+  String fileTitle = '';
+
+  /// Order the kept streams are written in, as source indices. null =
+  /// the order they appear in the source.
+  List<int>? streamOrder;
+
+  /// Also write each text subtitle track out as its own file next to
+  /// the output.
+  bool extractSubtitles = false;
+  String extractSubtitleFormat = 'subrip';
+
+
+  StreamMeta metaFor(int index) =>
+      streamMeta.putIfAbsent(index, () => StreamMeta());
+
+  /// Languages present on audio and subtitle streams, lower-cased.
+  /// 'und' stands in for anything untagged.
+  Set<String> get languagesPresent => {
+        for (final s in input.streams)
+          if (s.type == 'audio' || s.type == 'subtitle')
+            (s.language ?? 'und').toLowerCase(),
+      };
 
   ConvertPlan({
     required this.input,
@@ -310,6 +475,21 @@ class ConvertJob {
   double? progress;
   String statusLine = '';
   final List<String> log = [];
+
+  /// Live figures from FFmpeg's -progress stream.
+  String? speed; // '2.31x'
+  String? bitrate; // '1234.5kbits/s'
+  int? outputBytes; // bytes written so far
+  double? etaSeconds; // remaining wall-clock, from speed and duration
+  int? frame;
+  double? outSeconds; // position within the input
+
+  /// Which pass is running when two-pass encoding is on.
+  int pass = 0;
+  int passes = 1;
+
+  /// Sidecar subtitle files written alongside the output.
+  final List<String> sidecarFiles = [];
 
   /// Adaptations that were needed to make FFmpeg accept the job.
   List<String> repairedWith = const [];

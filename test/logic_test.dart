@@ -1277,4 +1277,355 @@ Default=1
       expect(a.percentChange, 0);
     });
   });
+
+  group('subtitles, order and GIF (no FFmpeg needed)', () {
+    final planner = ConvertPlanner(ToolManager());
+    ContainerSpec spec(String id) =>
+        containerSpecs.firstWhere((c) => c.id == id);
+
+    ProbeResult source({
+      String subCodec = 'subrip',
+      int subs = 1,
+      List<String?> subLangs = const ['eng'],
+    }) =>
+        ProbeResult(
+          path: '/tmp/in.mkv',
+          container: 'matroska',
+          durationSeconds: 10,
+          streams: [
+            StreamInfo(
+                index: 0,
+                type: 'video',
+                codec: 'h264',
+                width: 1920,
+                height: 1080,
+                fps: 25,
+                bitRate: 4000000),
+            StreamInfo(
+                index: 1,
+                type: 'audio',
+                codec: 'aac',
+                channels: 2,
+                sampleRate: 48000,
+                bitRate: 128000,
+                language: 'eng'),
+            for (var i = 0; i < subs; i++)
+              StreamInfo(
+                index: 2 + i,
+                type: 'subtitle',
+                codec: subCodec,
+                language: i < subLangs.length ? subLangs[i] : null,
+              ),
+          ],
+        );
+
+    test('text subtitles convert; image subtitles are only ever copied', () {
+      final text = source();
+      final mkv = spec('mkv');
+      expect(planner.defaultSelectionFor(text, text.streams[2], mkv), 'copy');
+      // MP4 holds only its own timed text, so SRT has to become that.
+      expect(planner.defaultSelectionFor(text, text.streams[2], spec('mp4')),
+          'mov_text');
+
+      final image = source(subCodec: 'hdmv_pgs_subtitle');
+      expect(ConvertPlanner.isImageSubtitle('hdmv_pgs_subtitle'), isTrue);
+      expect(planner.defaultSelectionFor(image, image.streams[2], mkv), 'copy');
+      expect(planner.defaultSelectionFor(image, image.streams[2], spec('mp4')),
+          'drop');
+    });
+
+    test('the subtitle formats offered are the ones the container holds', () {
+      final inv = EncoderInventory(
+          encoders: {'srt', 'ass', 'webvtt', 'mov_text'},
+          kindOf: const {
+            'srt': 'subtitle',
+            'ass': 'subtitle',
+            'webvtt': 'subtitle',
+            'mov_text': 'subtitle',
+          });
+      final mkv = planner.encodableFor(spec('mkv'), 'subtitle', inv);
+      expect(mkv.map((c) => c.id), containsAll(['subrip', 'ass']));
+      expect(mkv.map((c) => c.id), isNot(contains('mov_text')));
+
+      final mp4 = planner.encodableFor(spec('mp4'), 'subtitle', inv);
+      expect(mp4.map((c) => c.id), ['mov_text']);
+
+      // Nowhere to put them at all.
+      expect(planner.encodableFor(spec('mp3'), 'subtitle', inv), isEmpty);
+    });
+
+    test('subtitleOrdinal counts subtitle streams, not stream indices', () {
+      final s = source(subs: 3, subLangs: ['eng', 'jpn', 'fra']);
+      expect(ConvertPlanner.subtitleOrdinal(s, 2), 0);
+      expect(ConvertPlanner.subtitleOrdinal(s, 3), 1);
+      expect(ConvertPlanner.subtitleOrdinal(s, 4), 2);
+    });
+
+    test('a language filter drops the rest and puts them back', () {
+      final s = source(subs: 3, subLangs: ['eng', 'jpn', 'fra']);
+      final mkv = spec('mkv');
+      final plan = planner.plan(s, mkv);
+      expect(plan.languagesPresent, {'eng', 'jpn', 'fra'});
+
+      planner.applyLanguageFilter(plan, mkv, {'eng'}, EncoderInventory.empty);
+      expect(plan.selection[1], isNot('drop')); // English audio stays
+      expect(plan.selection[2], isNot('drop')); // English subtitles stay
+      expect(plan.selection[3], 'drop');
+      expect(plan.selection[4], 'drop');
+      expect(plan.selection[0], isNot('drop'), reason: 'video has no language');
+
+      planner.applyLanguageFilter(plan, mkv, {}, EncoderInventory.empty);
+      expect(plan.selection.values.where((v) => v == 'drop'), isEmpty);
+    });
+
+    test('an untagged track is filtered as "und"', () {
+      final s = source(subs: 2, subLangs: ['eng', null]);
+      final mkv = spec('mkv');
+      final plan = planner.plan(s, mkv);
+      expect(plan.languagesPresent, {'eng', 'und'});
+      planner.applyLanguageFilter(plan, mkv, {'und'}, EncoderInventory.empty);
+      expect(plan.selection[2], 'drop');
+      expect(plan.selection[3], isNot('drop'));
+    });
+
+    test('stream order moves streams and keeps the unmentioned ones', () {
+      final s = source(subs: 2, subLangs: ['eng', 'jpn']);
+      final plan = planner.plan(s, spec('mkv'));
+      expect(planner.orderedActions(plan).map((a) => a.stream.index),
+          [0, 1, 2, 3]);
+      plan.streamOrder = [1, 0];
+      expect(planner.orderedActions(plan).map((a) => a.stream.index),
+          [1, 0, 2, 3],
+          reason: 'anything left out keeps its place at the end');
+      plan.streamOrder = null;
+      expect(planner.orderedActions(plan).map((a) => a.stream.index),
+          [0, 1, 2, 3]);
+    });
+
+    test('two-pass only applies where there is a bitrate to aim at', () {
+      final plan = planner.plan(source(), spec('webm'));
+      expect(plan.selection[0], 'vp9', reason: 'WebM cannot hold H.264');
+      expect(planner.twoPassApplies(plan, EncoderInventory.empty), isFalse,
+          reason: 'constant quality has no target size');
+
+      plan.settings.mode = RateMode.constantBitrate;
+      expect(planner.twoPassApplies(plan, EncoderInventory.empty), isTrue);
+
+      plan.settings.mode = RateMode.constantQuality;
+      plan.settings.sizeCapMb = 8;
+      expect(planner.twoPassApplies(plan, EncoderInventory.empty), isTrue);
+
+      // Nothing being re-encoded, nothing to measure.
+      final remux = planner.plan(source(), spec('mkv'));
+      remux.settings.mode = RateMode.constantBitrate;
+      expect(planner.twoPassApplies(remux, EncoderInventory.empty), isFalse);
+    });
+
+    test('pass 1 measures and writes nothing; pass 2 reads it back', () {
+      final plan = planner.plan(source(), spec('mp4'));
+      plan.selection[0] = 'h264';
+      plan.settings.mode = RateMode.constantBitrate;
+      planner.recompute(plan, spec('mp4'));
+      final one =
+          planner.buildArgs(plan, spec('mp4'), '/tmp/o.mp4', EncoderInventory.empty, pass: 1);
+      expect(one, containsAllInOrder(['-pass', '1']));
+      expect(one, contains('-an'));
+      expect(one, contains('-sn'));
+      expect(one.last, ConvertPlanner.nullSink);
+      expect(one, isNot(contains('/tmp/o.mp4')));
+
+      final two =
+          planner.buildArgs(plan, spec('mp4'), '/tmp/o.mp4', EncoderInventory.empty, pass: 2);
+      expect(two, containsAllInOrder(['-pass', '2']));
+      expect(two, contains('-passlogfile'));
+      expect(two.last, '/tmp/o.mp4');
+    });
+
+    test('GIF builds its own palette rather than using the web one', () {
+      final gif = spec('gif');
+      final plan = planner.plan(source(), gif);
+      final args =
+          planner.buildArgs(plan, gif, '/tmp/o.gif', EncoderInventory.empty);
+      final graph = args[args.indexOf('-filter_complex') + 1];
+      expect(graph, contains('palettegen=max_colors=256:stats_mode=diff'));
+      expect(graph, contains('paletteuse=dither=bayer'));
+      expect(graph, contains('split'));
+      expect(graph, endsWith('[vout]'));
+      expect(args, containsAllInOrder(['-map', '[vout]']));
+      expect(args, containsAllInOrder(['-loop', '0']));
+      // The audio has nowhere to go, so it is not mapped at all.
+      expect(args.where((a) => a == '0:1'), isEmpty);
+    });
+
+    test('GIF palette settings reach the filter', () {
+      final gif = spec('gif');
+      final plan = planner.plan(source(), gif);
+      plan.settings.gif
+        ..maxColors = 64
+        ..statsMode = 'single'
+        ..dither = 'floyd_steinberg'
+        ..fps = 12
+        ..width = 320;
+      final args =
+          planner.buildArgs(plan, gif, '/tmp/o.gif', EncoderInventory.empty);
+      final graph = args[args.indexOf('-filter_complex') + 1];
+      expect(graph, contains('max_colors=64'));
+      expect(graph, contains('stats_mode=single'));
+      expect(graph, contains('dither=floyd_steinberg'));
+      expect(graph, isNot(contains('bayer_scale')),
+          reason: 'bayer_scale means nothing to the other dithers');
+      expect(graph, contains('new=1'),
+          reason: 'a per-frame palette has to be signalled to paletteuse');
+      expect(graph, contains('fps=12'));
+      expect(graph, contains('scale=320:-1:flags=lanczos'));
+    });
+
+    test('audio rate, channels and loudness reach the encoder', () {
+      final m4a = spec('m4a');
+      final plan = planner.plan(source(), m4a);
+      plan.selection[1] = 'aac'; // force a re-encode of a copyable track
+      plan.settings
+        ..audioSampleRate = 32000
+        ..audioChannels = 1
+        ..normalize = AudioNormalize.loudnorm
+        ..loudnessTarget = -14
+        ..gainDb = 3;
+      planner.recompute(plan, m4a);
+      final args =
+          planner.buildArgs(plan, m4a, '/tmp/o.m4a', EncoderInventory.empty);
+      expect(args, containsAllInOrder(['-ar:0', '32000']));
+      expect(args, containsAllInOrder(['-ac:0', '1']));
+      final filter = args[args.indexOf('-filter:0') + 1];
+      expect(filter, contains('loudnorm=I=-14:TP=-1.5:LRA=11'));
+      expect(filter, contains('aresample=32000'),
+          reason: 'loudnorm hands on 192 kHz, which most encoders refuse');
+      expect(filter, contains('volume=3dB'));
+    });
+
+    test('peak normalisation waits for a real measurement', () {
+      final m4a = spec('m4a');
+      final plan = planner.plan(source(), m4a);
+      plan.selection[1] = 'aac';
+      plan.settings.normalize = AudioNormalize.peak;
+      planner.recompute(plan, m4a);
+      var args =
+          planner.buildArgs(plan, m4a, '/tmp/o.m4a', EncoderInventory.empty);
+      expect(args.join(' '), isNot(contains('volume=')),
+          reason: 'nothing is applied until the peak is known');
+
+      plan.settings.measuredPeakDb = -6.5;
+      args = planner.buildArgs(plan, m4a, '/tmp/o.m4a', EncoderInventory.empty);
+      expect(args.join(' '), contains('volume=6.5dB'));
+    });
+
+    test('VBR replaces the fixed bitrate, and only where it exists', () {
+      final mp3 = spec('mp3');
+      final inv = EncoderInventory(
+          encoders: {'libmp3lame'}, kindOf: const {'libmp3lame': 'audio'});
+      final plan = planner.plan(source(), mp3);
+      plan.settings
+        ..audioVbr = true
+        ..audioVbrQuality = 3;
+      planner.recompute(plan, mp3, inv);
+      final args = planner.buildArgs(plan, mp3, '/tmp/o.mp3', inv);
+      expect(args, containsAllInOrder(['-q:0', '3']));
+      expect(args, isNot(contains('-b:0')));
+
+      // FLAC is lossless: there is no bitrate and no VBR scale.
+      final flac = spec('flac');
+      final lossless = planner.plan(source(), flac);
+      lossless.settings.audioVbr = true;
+      final flacArgs = planner.buildArgs(
+          lossless, flac, '/tmp/o.flac', EncoderInventory.empty);
+      expect(flacArgs.join(' '), isNot(contains('-q:0')));
+    });
+
+    test('burning subtitles in needs the video re-encoded', () {
+      final s = source();
+      final plan = planner.plan(s, spec('mkv'));
+      expect(planner.burnInNeedsTranscode(plan), isFalse,
+          reason: 'nothing is being burned in yet');
+      plan.settings.burnInSubtitle = 2;
+      expect(planner.burnInNeedsTranscode(plan), isTrue,
+          reason: 'the video is being copied');
+      plan.selection[0] = 'h264';
+      expect(planner.burnInNeedsTranscode(plan), isFalse);
+
+      planner.recompute(plan, spec('mkv'));
+      final args = planner
+          .buildArgs(plan, spec('mkv'), '/tmp/o.mkv', EncoderInventory.empty)
+          .join(' ');
+      expect(args, contains('subtitles='));
+      expect(args, contains('si=0'));
+    });
+
+    test('a container default becomes a setting you can see and change', () {
+      final mp4 = spec('mp4');
+      final plan = planner.plan(source(), mp4);
+      expect(plan.muxerOptions['movflags'], '+faststart');
+      final args =
+          planner.buildArgs(plan, mp4, '/tmp/o.mp4', EncoderInventory.empty);
+      expect('-movflags'.allMatches(args.join(' ')).length, 1,
+          reason: 'the default must not be written twice');
+
+      plan.muxerOptions['movflags'] = '+faststart+write_colr';
+      final changed =
+          planner.buildArgs(plan, mp4, '/tmp/o.mp4', EncoderInventory.empty);
+      expect(changed, containsAllInOrder(['-movflags', '+faststart+write_colr']));
+      expect('-movflags'.allMatches(changed.join(' ')).length, 1);
+    });
+
+    test('metadata and disposition are written per output stream', () {
+      final mkv = spec('mkv');
+      final s = ProbeResult(
+        path: '/tmp/in.mkv',
+        container: 'matroska',
+        durationSeconds: 10,
+        streams: [
+          StreamInfo(index: 0, type: 'video', codec: 'h264', width: 8, height: 8),
+          StreamInfo(
+              index: 1,
+              type: 'audio',
+              codec: 'aac',
+              channels: 2,
+              disposition: const {'default'}),
+          StreamInfo(index: 2, type: 'audio', codec: 'aac', channels: 2),
+        ],
+      );
+      final plan = planner.plan(s, mkv);
+      plan.fileTitle = 'A film';
+      plan.metaFor(2)
+        ..title = 'Commentary'
+        ..language = 'eng'
+        ..isDefault = true;
+      planner.recompute(plan, mkv);
+      final args =
+          planner.buildArgs(plan, mkv, '/tmp/o.mkv', EncoderInventory.empty);
+      expect(args, containsAllInOrder(['-metadata', 'title=A film']));
+      expect(args, containsAllInOrder(['-metadata:s:2', 'title=Commentary']));
+      expect(args, containsAllInOrder(['-metadata:s:2', 'language=eng']));
+      expect(args, containsAllInOrder(['-disposition:2', 'default']));
+      // The track that used to be default loses it, because only one
+      // audio track can be the one a player picks.
+      expect(args, containsAllInOrder(['-disposition:1', '0']));
+    });
+
+    test('a filter path survives the filtergraph parser', () {
+      final quoted = ConvertPlanner.filterPath("/home/me/it's here.mkv");
+      expect(quoted.startsWith("'"), isTrue);
+      expect(quoted.endsWith("'"), isTrue);
+      expect(quoted, contains(r"'\''"),
+          reason: 'a quote has to be closed, escaped and reopened');
+    });
+
+    test('pasted text becomes one task per link', () {
+      expect(DownloadManager.extractUrls('nothing here'), isEmpty);
+      expect(
+          DownloadManager.extractUrls(
+              'a https://x.com/1 b https://x.com/2, and https://x.com/3.'),
+          ['https://x.com/1', 'https://x.com/2', 'https://x.com/3']);
+      expect(DownloadManager.extractUrls('https://x.com/1 https://x.com/1'),
+          ['https://x.com/1']);
+    });
+  });
 }

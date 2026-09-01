@@ -431,8 +431,97 @@ const _audio = <CodecInfo>[
   ),
 ];
 
+/// Text subtitle formats Multi can write. Image-based subtitles
+/// (PGS, VobSub) cannot be turned into text, so they are only ever
+/// copied — there is no encoder for them here.
+const _subtitle = <CodecInfo>[
+  CodecInfo(
+    id: 'subrip', label: 'SubRip (SRT)', kind: 'subtitle', rank: 1,
+    shortDescription: 'plain text, plays everywhere',
+    description:
+        'The most widely supported subtitle format there is. Timing and text only — no positioning, fonts or colours.',
+    encoders: ['srt', 'subrip'],
+  ),
+  CodecInfo(
+    id: 'ass', label: 'ASS / SSA', kind: 'subtitle', rank: 2,
+    shortDescription: 'styled: fonts, colours, positioning',
+    description:
+        'Advanced SubStation Alpha. Carries fonts, colours, positioning and karaoke timing, which is why fansubs and anime use it. MKV holds it; MP4 does not.',
+    encoders: ['ass', 'ssa'],
+  ),
+  CodecInfo(
+    id: 'webvtt', label: 'WebVTT', kind: 'subtitle', rank: 3,
+    shortDescription: 'the web standard, for HTML5 video',
+    description:
+        'What browsers use for <track> captions. Close to SRT with a little styling on top.',
+    encoders: ['webvtt'],
+  ),
+  CodecInfo(
+    id: 'mov_text', label: 'MP4 timed text', kind: 'subtitle', rank: 4,
+    shortDescription: 'the only kind MP4 can hold',
+    description:
+        'MPEG-4 Part 17 timed text. The single subtitle format MP4 and MOV accept, so anything going into those has to become this.',
+    encoders: ['mov_text'],
+  ),
+];
+
+/// An encoder's variable-bitrate mode, in its own units.
+///
+/// VBR spends bits where the audio needs them instead of holding a
+/// fixed rate, so the same quality costs less. Every encoder spells it
+/// differently, and several do not have it at all.
+class VbrMode {
+  /// FFmpeg option name, applied per stream ('q' → '-q:1').
+  final String flag;
+  final double min, max, def;
+
+  /// True when a lower number means better quality (LAME, Vorbis are
+  /// the opposite way round from each other).
+  final bool lowerIsBetter;
+
+  /// Roughly what each end of the scale costs, for the UI.
+  final String help;
+
+  const VbrMode({
+    required this.flag,
+    required this.min,
+    required this.max,
+    required this.def,
+    required this.lowerIsBetter,
+    required this.help,
+  });
+
+  /// Nicely formatted for FFmpeg: '2' rather than '2.0'.
+  String format(double v) =>
+      v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
+}
+
+/// Keyed by encoder name, because the same codec has encoders with
+/// completely different VBR scales.
+const vbrModes = <String, VbrMode>{
+  'libmp3lame': VbrMode(
+    flag: 'q', min: 0, max: 9, def: 2, lowerIsBetter: true,
+    help: 'LAME quality: 0 is ~245 kbps, 2 is ~190, 5 is ~130, 9 is ~65.',
+  ),
+  'libvorbis': VbrMode(
+    flag: 'q', min: 0, max: 10, def: 5, lowerIsBetter: false,
+    help: 'Vorbis quality: 3 is ~110 kbps, 5 is ~160, 8 is ~256.',
+  ),
+  'libfdk_aac': VbrMode(
+    flag: 'vbr', min: 1, max: 5, def: 4, lowerIsBetter: false,
+    help: 'FDK quality: 1 is ~32 kbps/channel, 4 is ~80, 5 is ~112.',
+  ),
+  'libtwolame': VbrMode(
+    flag: 'q', min: 0, max: 50, def: 10, lowerIsBetter: true,
+    help: 'MP2 quality — lower is better.',
+  ),
+};
+
 class CodecCatalog {
-  static const curated = <CodecInfo>[..._video, ..._audio];
+  static const curated = <CodecInfo>[..._video, ..._audio, ..._subtitle];
+
+  /// The VBR mode of an encoder, or null when it has none.
+  static VbrMode? vbrFor(String encoder) => vbrModes[encoder];
 
   static CodecInfo? byId(String id) {
     for (final c in curated) {

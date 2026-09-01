@@ -24,12 +24,26 @@ class _DownloadPageState extends State<DownloadPage> {
   String _lastText = '';
 
   void _submit(DownloadManager dm, [String? text]) {
-    final url = (text ?? _urlController.text).trim();
-    if (url.isEmpty) return;
-    dm.addUrl(url);
+    final raw = (text ?? _urlController.text).trim();
+    if (raw.isEmpty) return;
+    // One link or twenty: whatever was pasted gets split into its own
+    // task each, and nothing is downloaded until Start.
+    dm.addUrls(raw);
     _urlController.clear();
     _lastText = '';
   }
+
+  /// True when the whole box is a single link, rather than a link
+  /// halfway through being typed.
+  bool _isWholeUrl(String v) {
+    final t = v.trim();
+    final uri = Uri.tryParse(t);
+    return t.startsWith('magnet:') ||
+        (uri != null &&
+            (uri.isScheme('http') || uri.isScheme('https')) &&
+            uri.host.contains('.'));
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -53,17 +67,20 @@ class _DownloadPageState extends State<DownloadPage> {
                     isDense: true,
                   ),
                   onChanged: (v) {
-                    // A paste lands as one big change that parses as a URL:
-                    // analyze it immediately (nothing downloads yet).
+                    // A paste lands as one big change: analyze it
+                    // immediately (nothing downloads yet). Several links
+                    // at once is unmistakably a paste; a single one has
+                    // to fill the box before it counts, so a link being
+                    // typed out doesn't fire halfway through.
                     final grew = v.length - _lastText.length;
                     _lastText = v;
-                    final uri = Uri.tryParse(v.trim());
-                    final isUrl = v.trim().startsWith('magnet:') ||
-                        (uri != null &&
-                            (uri.isScheme('http') || uri.isScheme('https')) &&
-                            uri.host.contains('.'));
-                    if (grew > 5 && isUrl) _submit(dm, v);
+                    if (grew <= 5) return;
+                    final found = DownloadManager.extractUrls(v);
+                    if (found.length > 1 || (found.length == 1 && _isWholeUrl(v))) {
+                      _submit(dm, v);
+                    }
                   },
+
                   onSubmitted: (v) => _submit(dm, v),
                 ),
               ),
@@ -104,9 +121,25 @@ class _DownloadPageState extends State<DownloadPage> {
                     .bodySmall
                     ?.copyWith(color: Theme.of(context).colorScheme.outline),
               ),
+              if (dm.tasks.isNotEmpty) ...[
+                const SizedBox(width: 12),
+                FilledButton.tonalIcon(
+                  onPressed:
+                      dm.readyCount == 0 ? null : () => dm.startAll(),
+                  icon: const Icon(Icons.download_done_outlined, size: 18),
+                  label: Text(dm.readyCount == 0
+                      ? 'Download all'
+                      : 'Download all (${dm.readyCount})'),
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    textStyle: Theme.of(context).textTheme.labelMedium,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
+
         const Divider(height: 24),
         Expanded(
           child: dm.tasks.isEmpty
@@ -239,12 +272,14 @@ class _TaskCardState extends State<_TaskCard> {
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall),
                 ),
-                if (_configurable || task.status == TaskStatus.queued) ...[
-                  _PresetChip(task: task),
-                  const SizedBox(width: 8),
-                ],
               ],
             ),
+            if (_configurable || task.status == TaskStatus.queued)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: _SpeedPresetButtons(task: task),
+              ),
+
             if (task.status == TaskStatus.running ||
                 (task.status == TaskStatus.done && task.parts.isNotEmpty))
               _PartBars(task: task),
@@ -889,16 +924,11 @@ class _PreviewSection extends StatelessWidget {
                         ].join(' · '),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                      const SizedBox(height: 8),
+                      _FormatPresetButtons(task: task),
                       const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          _FormatPresetChip(task: task),
-                          _ConvertAfterChip(task: task),
-                        ],
-                      ),
+                      _ConvertAfterChip(task: task),
+
                     ],
                   ),
                 ),
@@ -967,23 +997,34 @@ class _PreviewSection extends StatelessWidget {
   }
 }
 
-/// Format preset menu: quick choices with descriptions, plus the full
-/// custom format picker.
-class _FormatPresetChip extends StatelessWidget {
+/// Format presets as buttons rather than a hidden menu: the common
+/// three are one click away, and the full list is behind Custom.
+class _FormatPresetButtons extends StatelessWidget {
   final DownloadTask task;
-  const _FormatPresetChip({required this.task});
+  const _FormatPresetButtons({required this.task});
 
   static const _presets = <(String, String, String)>[
     // (key, title, description)
-    ('auto', 'Best (auto)', 'Highest quality yt-dlp can find'),
+    ('auto', 'Best', 'Highest quality yt-dlp can find'),
     (
       'compat',
-      'Most compatible',
+      'Compatible',
       'H.264 video + AAC audio when available — plays on everything'
     ),
     ('audio', 'Audio only', 'Best audio track, no video'),
-    ('custom', 'Custom…', 'Pick from every available format'),
   ];
+
+  /// Which preset the task's current selection corresponds to, or null
+  /// when it came from the custom picker.
+  static String? keyFor(DownloadTask task) {
+    if (task.chosenFormat == null && task.formatSort == null) return 'auto';
+    if (task.formatSort == 'vcodec:h264,acodec:aac' &&
+        task.chosenFormat == null) {
+      return 'compat';
+    }
+    if (task.chosenFormat == 'bestaudio') return 'audio';
+    return null;
+  }
 
   void _apply(BuildContext context, String key) {
     final dm = context.read<DownloadManager>();
@@ -992,23 +1033,14 @@ class _FormatPresetChip extends StatelessWidget {
         task.chosenFormat = null;
         task.formatSort = null;
         task.chosenFormatLabel = null;
-        break;
       case 'compat':
         task.chosenFormat = null;
         task.formatSort = 'vcodec:h264,acodec:aac';
         task.chosenFormatLabel = 'Format: Most compatible';
-        break;
       case 'audio':
         task.chosenFormat = 'bestaudio';
         task.formatSort = null;
         task.chosenFormatLabel = 'Format: Audio only';
-        break;
-      case 'custom':
-        showDialog(
-          context: context,
-          builder: (_) => FormatPickerDialog(task: task),
-        );
-        return;
     }
     dm.touch();
   }
@@ -1016,39 +1048,122 @@ class _FormatPresetChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final hasFormats = (task.preview?.formats.isNotEmpty ?? false);
-    return PopupMenuButton<String>(
-      tooltip: 'Which version to download',
-      onSelected: (k) => _apply(context, k),
-      itemBuilder: (_) => [
-        for (final (key, title, desc) in _presets)
-          if (key != 'custom' || hasFormats)
-            PopupMenuItem(
-              value: key,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 340),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(title),
-                    Text(desc,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: cs.outline)),
-                  ],
+    final hasFormats = task.preview?.formats.isNotEmpty ?? false;
+    final selected = keyFor(task);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text('Format',
+            style: Theme.of(context)
+                .textTheme
+                .labelSmall
+                ?.copyWith(color: cs.outline)),
+        SegmentedButton<String>(
+          segments: [
+            for (final (key, title, desc) in _presets)
+              ButtonSegment(
+                value: key,
+                label: Tooltip(message: desc, child: Text(title)),
+              ),
+          ],
+          selected: {?selected},
+
+          emptySelectionAllowed: true,
+          showSelectedIcon: false,
+          onSelectionChanged: (s) {
+            if (s.isNotEmpty) _apply(context, s.first);
+          },
+          style: ButtonStyle(
+            visualDensity: VisualDensity.compact,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            textStyle: WidgetStatePropertyAll(
+                Theme.of(context).textTheme.labelSmall),
+          ),
+        ),
+        if (hasFormats)
+          OutlinedButton.icon(
+            onPressed: () => showDialog(
+              context: context,
+              builder: (_) => FormatPickerDialog(task: task),
+            ),
+            icon: const Icon(Icons.tune, size: 16),
+            label: const Text('Custom…'),
+            style: OutlinedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              textStyle: Theme.of(context).textTheme.labelSmall,
+              foregroundColor: selected == null ? cs.primary : null,
+            ),
+          ),
+        if (selected == null && task.chosenFormatLabel != null)
+          Text(task.chosenFormatLabel!,
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: cs.primary)),
+      ],
+    );
+  }
+}
+
+/// The speed presets, side by side. The one Multi recommends for this
+/// site is marked, but it is still just a button like the others.
+class _SpeedPresetButtons extends StatelessWidget {
+  final DownloadTask task;
+  const _SpeedPresetButtons({required this.task});
+
+  static IconData iconFor(PresetId p) => switch (p) {
+        PresetId.speed => Icons.speed,
+        PresetId.balanced => Icons.balance,
+        PresetId.gentle => Icons.visibility_off_outlined,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final dm = context.read<DownloadManager>();
+    final cs = Theme.of(context).colorScheme;
+    final host = Uri.tryParse(task.url)?.host ?? '';
+    final recommended = Presets.recommendedFor(host);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text('Pace',
+            style: Theme.of(context)
+                .textTheme
+                .labelSmall
+                ?.copyWith(color: cs.outline)),
+        SegmentedButton<PresetId>(
+          segments: [
+            for (final p in PresetId.values)
+              ButtonSegment(
+                value: p,
+                icon: Icon(iconFor(p), size: 15),
+                label: Tooltip(
+                  message: p == recommended
+                      ? '${p.description}\n★ recommended for $host'
+                      : p.description,
+                  child: Text(p == recommended ? '${p.label} ★' : p.label),
                 ),
               ),
-            ),
+          ],
+          selected: {task.options.preset},
+          showSelectedIcon: false,
+          onSelectionChanged: (s) {
+            task.options.preset = s.first;
+            dm.touch();
+          },
+          style: ButtonStyle(
+            visualDensity: VisualDensity.compact,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            textStyle: WidgetStatePropertyAll(
+                Theme.of(context).textTheme.labelSmall),
+          ),
+        ),
       ],
-      child: Chip(
-        avatar: const Icon(Icons.video_settings, size: 16),
-        label: Text(task.chosenFormatLabel ?? 'Format: Best (auto)'),
-        labelStyle: Theme.of(context).textTheme.labelSmall,
-        visualDensity: VisualDensity.compact,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
     );
   }
 }
@@ -1146,55 +1261,6 @@ class _EngineChip extends StatelessWidget {
           ),
       ],
       child: chip,
-    );
-  }
-}
-
-class _PresetChip extends StatelessWidget {
-  final DownloadTask task;
-  const _PresetChip({required this.task});
-
-  @override
-  Widget build(BuildContext context) {
-    final dm = context.read<DownloadManager>();
-    final host = Uri.tryParse(task.url)?.host ?? '';
-    final recommended = Presets.recommendedFor(host);
-    return PopupMenuButton<PresetId>(
-      tooltip: 'Preset — auto-picked for this site',
-      initialValue: task.options.preset,
-      onSelected: (p) {
-        task.options.preset = p;
-        dm.touch();
-      },
-      itemBuilder: (_) => [
-        for (final p in PresetId.values)
-          PopupMenuItem(
-            value: p,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-              title: Text(
-                  '${p.label}${p == recommended ? '  ★ recommended' : ''}'),
-              subtitle: Text(p.description,
-                  style: Theme.of(context).textTheme.bodySmall),
-            ),
-          ),
-      ],
-      child: Chip(
-        avatar: Icon(
-          switch (task.options.preset) {
-            PresetId.speed => Icons.speed,
-            PresetId.balanced => Icons.balance,
-            PresetId.gentle => Icons.visibility_off_outlined,
-          },
-          size: 16,
-        ),
-        label: Text(task.options.preset.label +
-            (task.options.preset == recommended ? ' ★' : '')),
-        labelStyle: Theme.of(context).textTheme.labelSmall,
-        visualDensity: VisualDensity.compact,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
     );
   }
 }

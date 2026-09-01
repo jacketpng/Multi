@@ -92,9 +92,76 @@ class DownloadManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Pull every link out of a block of text.
+  ///
+  /// Copying a few links at once usually means copying whatever was
+  /// around them too — newlines, commas, quotes, a trailing full stop.
+  /// This finds the URLs in all of that, in the order they appear, and
+  /// drops repeats.
+  static List<String> extractUrls(String text) {
+    final found = <String>[];
+    final seen = <String>{};
+    final re = RegExp(r'''(?:https?://|magnet:\?)[^\s'"<>\)\]\}\\]+''');
+    for (final m in re.allMatches(text)) {
+      var url = m.group(0)!;
+      // Trailing punctuation belongs to the sentence, not the link.
+      while (url.isNotEmpty && '.,;:!?'.contains(url[url.length - 1])) {
+        url = url.substring(0, url.length - 1);
+      }
+      if (url.length < 12) continue;
+      if (seen.add(url)) found.add(url);
+    }
+    return found;
+  }
+
+  /// Add everything in a pasted block, one task per link.
+  ///
+  /// Returns how many were added. Falls back to treating the whole
+  /// string as one link when no URL pattern matches, so nothing typed
+  /// by hand is silently swallowed.
+  Future<int> addUrls(String text) async {
+    final urls = extractUrls(text);
+    if (urls.isEmpty) {
+      final single = text.trim();
+      if (single.isEmpty) return 0;
+      await addUrl(single);
+      return 1;
+    }
+    // Add them all before resolving, so the list fills in at once and
+    // the analyses run one after another rather than all at the host.
+    for (final url in urls) {
+      await addUrl(url);
+    }
+    return urls.length;
+  }
+
+  /// Tasks that have been analysed and are waiting on a Start press.
+  int get readyCount =>
+      tasks.where((t) => t.status == TaskStatus.ready).length;
+
+  /// Start every task that is ready to go. Anything still waiting on a
+  /// cookie choice, an engine choice or a file selection is left alone
+  /// — those need an answer, and Multi does not answer for the user.
+  int startAll() {
+    var started = 0;
+    // Oldest first, so the queue runs in the order they were added.
+    for (final task in tasks.reversed.toList()) {
+      if (task.status != TaskStatus.ready) continue;
+      task.status = TaskStatus.queued;
+      task.statusLine = 'Queued…';
+      started++;
+    }
+    if (started > 0) {
+      notifyListeners();
+      _pump();
+    }
+    return started;
+  }
+
   /// Entry point for the URL bar: route the URL, fetch preview info
   /// (formats, sizes, samples), then wait for the user to press Start.
   Future<void> addUrl(String url) async {
+
     url = url.trim();
     if (url.isEmpty) return;
     final host = Uri.tryParse(url)?.host ?? '';

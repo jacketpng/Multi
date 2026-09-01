@@ -11,7 +11,9 @@ import '../../app.dart';
 import '../../models/convert.dart';
 import '../../services/convert_manager.dart';
 import '../../services/convert_planner.dart';
+import '../../ui/widgets/convert_options.dart';
 import '../../ui/widgets/format_options_panel.dart';
+
 import '../../util/platform.dart';
 
 class ConvertPage extends StatefulWidget {
@@ -296,8 +298,50 @@ class _ConvertPageState extends State<ConvertPage> {
             inventory: cm.inventory,
             onChanged: _recompute,
           ),
+          if (_target!.id == 'gif') ...[
+            const SizedBox(height: 12),
+            GifCard(
+              plan: _plan!,
+              target: _target!,
+              inventory: cm.inventory,
+              onChanged: _recompute,
+            ),
+          ],
+          if (!_target!.audioOnly &&
+              _input!.streams
+                  .any((s) => s.type == 'video' && !s.attachedPic)) ...[
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: _FiltersSection(
+                  plan: _plan!,
+                  target: _target!,
+                  inventory: cm.inventory,
+                  onChanged: _recompute,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          AudioCard(
+            plan: _plan!,
+            target: _target!,
+            inventory: cm.inventory,
+            onChanged: _recompute,
+          ),
+
+          if (_input!.streams.any((s) => s.type == 'subtitle')) ...[
+            const SizedBox(height: 12),
+            SubtitleCard(
+              plan: _plan!,
+              target: _target!,
+              onChanged: _recompute,
+            ),
+          ],
           const SizedBox(height: 12),
           _TrimCard(plan: _plan!, onChanged: _recompute),
+
           const SizedBox(height: 12),
           FormatOptionsPanel(
             plan: _plan!,
@@ -420,15 +464,14 @@ class _PlanCard extends StatelessWidget {
             const SizedBox(height: 10),
             _SizeSummary(plan: plan),
             const Divider(height: 20),
-            for (final action in plan.actions)
-              _StreamRow(
-                plan: plan,
-                target: target,
-                action: action,
-                planner: planner,
-                inventory: inventory,
-                onChanged: onChanged,
-              ),
+            ..._streamSections(context, planner),
+            LanguageFilterBar(
+              plan: plan,
+              target: target,
+              inventory: inventory,
+              onChanged: onChanged,
+            ),
+
             if (plan.transcodedCount > 0) ...[
               const Divider(height: 24),
               _TranscodeSettingsPanel(
@@ -443,9 +486,76 @@ class _PlanCard extends StatelessWidget {
       ),
     );
   }
+
+  /// Rows grouped by what they are, in the order they will be written.
+  ///
+  /// A file with a dozen subtitle tracks would otherwise bury the video
+  /// and audio it came for, so past three they fold away.
+  List<Widget> _streamSections(BuildContext context, ConvertPlanner planner) {
+    final ordered = planner.orderedActions(plan);
+    Widget row(StreamAction a) => _StreamRow(
+          plan: plan,
+          target: target,
+          action: a,
+          planner: planner,
+          inventory: inventory,
+          onChanged: onChanged,
+          onMove: (delta) => _move(planner, a.stream, delta),
+        );
+    final subs = [
+      for (final a in ordered)
+        if (a.stream.type == 'subtitle') a,
+    ];
+    final kept = subs.where((a) => a.kind != StreamActionKind.drop).length;
+    return [
+      for (final a in ordered)
+        if (a.stream.type != 'subtitle') row(a),
+      if (subs.isNotEmpty && subs.length <= 3)
+        for (final a in subs) row(a),
+      if (subs.length > 3)
+        Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            childrenPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.subtitles_outlined, size: 20),
+            title: Text('${subs.length} subtitle tracks',
+                style: Theme.of(context).textTheme.bodyMedium),
+            subtitle: Text(
+                '$kept kept, ${subs.length - kept} dropped — open to change '
+                'any of them',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.outline)),
+            children: [for (final a in subs) row(a)],
+          ),
+        ),
+    ];
+  }
+
+  /// Swap a stream with its neighbour of the same type. Reordering
+  /// video against audio is not a thing anyone wants, and it changes
+  /// which stream players treat as the main one.
+  void _move(ConvertPlanner planner, StreamInfo s, int delta) {
+    final ordered = planner.orderedActions(plan);
+    final order = [for (final a in ordered) a.stream.index];
+    final sameType = [
+      for (final a in ordered)
+        if (a.stream.type == s.type) a.stream.index,
+    ];
+    final pos = sameType.indexOf(s.index);
+    final to = pos + delta;
+    if (pos < 0 || to < 0 || to >= sameType.length) return;
+    final other = sameType[to];
+    final i = order.indexOf(s.index), j = order.indexOf(other);
+    order[i] = other;
+    order[j] = s.index;
+    plan.streamOrder = order;
+    onChanged();
+  }
 }
 
 /// Original size, estimated size, and the change between them.
+
 class _SizeSummary extends StatelessWidget {
   final ConvertPlan plan;
   const _SizeSummary({required this.plan});
@@ -530,6 +640,10 @@ class _StreamRow extends StatelessWidget {
   final ConvertPlanner planner;
   final EncoderInventory inventory;
   final VoidCallback onChanged;
+
+  /// Move this stream one place earlier (-1) or later (+1) among the
+  /// streams of its own type.
+  final void Function(int delta)? onMove;
   const _StreamRow({
     required this.plan,
     required this.target,
@@ -537,7 +651,9 @@ class _StreamRow extends StatelessWidget {
     required this.planner,
     required this.inventory,
     required this.onChanged,
+    this.onMove,
   });
+
 
   @override
   Widget build(BuildContext context) {
@@ -562,6 +678,8 @@ class _StreamRow extends StatelessWidget {
     final selectedCodec =
         selection != 'copy' && selection != 'drop' ? codecInfo(selection) : null;
     final pct = action.percentChange;
+    final meta = plan.streamMeta[s.index];
+
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
@@ -592,7 +710,27 @@ class _StreamRow extends StatelessWidget {
               const SizedBox(width: 10),
               if (action.kind != StreamActionKind.drop)
                 _sizeCell(context, action, pct),
+              if (action.kind != StreamActionKind.drop && onMove != null) ...[
+                _moveButton(context, Icons.keyboard_arrow_up, 'Move earlier', -1),
+                _moveButton(context, Icons.keyboard_arrow_down, 'Move later', 1),
+                IconButton(
+                  tooltip: 'Name, language and flags',
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  color: meta != null && !meta.isEmpty ? cs.primary : null,
+                  icon: const Icon(Icons.label_outline),
+                  onPressed: () async {
+                    await showDialog(
+                      context: context,
+                      builder: (_) =>
+                          StreamMetaDialog(plan: plan, stream: s),
+                    );
+                    onChanged();
+                  },
+                ),
+              ],
               if (choices != null)
+
                 _codecDropdown(context, s, choices, selection)
               else
                 Container(
@@ -623,12 +761,42 @@ class _StreamRow extends StatelessWidget {
                     ?.copyWith(color: cs.tertiary),
               ),
             ),
+          if (meta != null && !meta.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 30, top: 2),
+              child: Text(
+                [
+                  if (meta.title.isNotEmpty) '“${meta.title}”',
+                  if (meta.language.isNotEmpty) meta.language,
+                  if (meta.isDefault == true) 'default',
+                  if (meta.forced == true) 'forced',
+                ].join(' · '),
+                style: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: cs.primary),
+              ),
+            ),
+
         ],
       ),
     );
   }
 
+  Widget _moveButton(
+          BuildContext context, IconData icon, String tip, int delta) =>
+      IconButton(
+        tooltip: tip,
+        visualDensity: VisualDensity.compact,
+        iconSize: 18,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+        icon: Icon(icon),
+        onPressed: () => onMove!(delta),
+      );
+
   /// Per-stream original → estimated size with the percentage change.
+
   Widget _sizeCell(BuildContext context, StreamAction a, double? pct) {
     final cs = Theme.of(context).colorScheme;
     final small =
@@ -667,14 +835,23 @@ class _StreamRow extends StatelessWidget {
     );
   }
 
-  /// Video and audio streams get a codec choice; subtitles/data stay
-  /// automatic.
+  /// Video, audio and text subtitle streams all get a codec choice.
+  ///
+  /// An image-based subtitle is a picture: it can be copied or dropped
+  /// or burned into the frame, but there is no text in it to rewrite,
+  /// so no format list is offered for it.
   List<CodecInfo>? _choicesFor(StreamInfo s) {
+    if (s.type == 'subtitle') {
+      if (ConvertPlanner.isImageSubtitle(s.codec)) return null;
+      final list = planner.encodableFor(target, 'subtitle', inventory);
+      return list.isEmpty ? null : list;
+    }
     if (s.type != 'video' && s.type != 'audio') return null;
     if (target.audioOnly && s.type == 'video') return null;
     final list = planner.encodableFor(target, s.type, inventory);
     return list.isEmpty ? null : list;
   }
+
 
   Widget _codecDropdown(BuildContext context, StreamInfo s,
       List<CodecInfo> choices, String selection) {
@@ -761,10 +938,6 @@ class _TranscodeSettingsPanel extends StatelessWidget {
     return null;
   }
 
-  bool get _hasAudioTranscode => plan.actions.any((a) =>
-      a.kind == StreamActionKind.transcode &&
-      a.stream.type == 'audio' &&
-      !(codecInfo(a.targetCodec!)?.lossless ?? false));
 
   @override
   Widget build(BuildContext context) {
@@ -916,37 +1089,27 @@ class _TranscodeSettingsPanel extends StatelessWidget {
                   },
           ),
           _SizeCapRow(plan: plan, onChanged: onChanged),
+          if (planner.twoPassApplies(plan, inventory))
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Two-pass encoding'),
+              subtitle: const Text(
+                  'Encodes once to measure where the difficult parts are, '
+                  'then again to spend the bits there. Twice as slow, and '
+                  'it hits the target size far more accurately.'),
+              value: st.twoPass,
+              onChanged: (v) {
+                st.twoPass = v ?? false;
+                onChanged();
+              },
+            ),
         ],
-        if (_hasAudioTranscode)
-          Row(
-            children: [
-              const SizedBox(width: 190, child: Text('Audio bitrate')),
-              DropdownButton<int?>(
-                value: plan.settings.audioKbps,
-                isDense: true,
-                items: const [
-                  DropdownMenuItem(value: null, child: Text('Codec default')),
-                  DropdownMenuItem(value: 64, child: Text('64 kbps')),
-                  DropdownMenuItem(value: 96, child: Text('96 kbps')),
-                  DropdownMenuItem(value: 128, child: Text('128 kbps')),
-                  DropdownMenuItem(value: 160, child: Text('160 kbps')),
-                  DropdownMenuItem(value: 192, child: Text('192 kbps')),
-                  DropdownMenuItem(value: 256, child: Text('256 kbps')),
-                  DropdownMenuItem(value: 320, child: Text('320 kbps')),
-                  DropdownMenuItem(value: 448, child: Text('448 kbps')),
-                ],
-                onChanged: (v) {
-                  plan.settings.audioKbps = v;
-                  onChanged();
-                },
-              ),
-            ],
-          ),
-        const SizedBox(height: 8),
-        _FiltersSection(plan: plan, onChanged: onChanged),
       ],
     );
   }
+
 
   static String _cqFlagLabel(HwFamily f) => switch (f.id) {
         'nvenc' => 'CQ',
@@ -1185,8 +1348,16 @@ class _BitrateSlider extends StatelessWidget {
 /// Common FFmpeg picture filters, plus a raw escape hatch.
 class _FiltersSection extends StatelessWidget {
   final ConvertPlan plan;
+  final ContainerSpec target;
+  final EncoderInventory inventory;
   final VoidCallback onChanged;
-  const _FiltersSection({required this.plan, required this.onChanged});
+  const _FiltersSection({
+    required this.plan,
+    required this.target,
+    required this.inventory,
+    required this.onChanged,
+  });
+
 
   static const _scales = <String, String>{
     '': 'Keep original size',
@@ -1234,9 +1405,23 @@ class _FiltersSection extends StatelessWidget {
               .labelSmall
               ?.copyWith(color: f.isEmpty ? cs.outline : cs.tertiary)),
       children: [
+        // A filter draws on frames, which a copied stream never gives
+        // it. Rather than leaving these controls to do nothing, say so.
+        ReencodeNotice(
+          plan: plan,
+          target: target,
+          inventory: inventory,
+          type: 'video',
+          explanation:
+              'The video is being copied bit-for-bit, so nothing here can '
+              'reach it — a filter has to draw on frames, and a copy never '
+              'produces any.',
+          onChanged: onChanged,
+        ),
         Row(
           children: [
             const SizedBox(width: 190, child: Text('Resolution')),
+
             Expanded(
               child: DropdownButton<String>(
                 value: _scales.containsKey(f.scale) ? f.scale : '',
@@ -1318,22 +1503,10 @@ class _FiltersSection extends StatelessWidget {
               ),
           ],
         ),
-        Row(
-          children: [
-            const SizedBox(width: 190, child: Text('Crop (w:h:x:y)')),
-            Expanded(
-              child: TextFormField(
-                initialValue: f.crop,
-                decoration: const InputDecoration(
-                    isDense: true, hintText: 'e.g. 1920:800:0:140'),
-                onChanged: (v) {
-                  f.crop = v.trim();
-                  onChanged();
-                },
-              ),
-            ),
-          ],
-        ),
+        BlackBarsRow(plan: plan, onChanged: onChanged),
+        _CropField(filters: f, onChanged: onChanged),
+
+
         const SizedBox(height: 8),
         TextFormField(
           initialValue: f.custom,
@@ -1354,8 +1527,65 @@ class _FiltersSection extends StatelessWidget {
   }
 }
 
+/// The crop box, which is typed into *and* filled in by the black-bar
+/// detector — so it has to take a new value from outside without
+/// interrupting anything half-typed.
+class _CropField extends StatefulWidget {
+  final VideoFilters filters;
+  final VoidCallback onChanged;
+  const _CropField({required this.filters, required this.onChanged});
+
+  @override
+  State<_CropField> createState() => _CropFieldState();
+}
+
+class _CropFieldState extends State<_CropField> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.filters.crop);
+  final FocusNode _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_controller.text != widget.filters.crop && !_focus.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _focus.hasFocus) return;
+        if (_controller.text != widget.filters.crop) {
+          _controller.text = widget.filters.crop;
+        }
+      });
+    }
+    return Row(
+      children: [
+        const SizedBox(width: 190, child: Text('Crop (w:h:x:y)')),
+        Expanded(
+          child: TextField(
+            controller: _controller,
+            focusNode: _focus,
+            decoration: const InputDecoration(
+                isDense: true, hintText: 'e.g. 1920:800:0:140'),
+            onChanged: (v) {
+              widget.filters.crop = v.trim();
+              // Typed by hand, so it is no longer the detector's answer.
+              widget.filters.cropDetected = false;
+              widget.onChanged();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Keep only part of the input.
 class _TrimCard extends StatelessWidget {
+
   final ConvertPlan plan;
   final VoidCallback onChanged;
   const _TrimCard({required this.plan, required this.onChanged});
@@ -1530,6 +1760,46 @@ class _JobTile extends StatelessWidget {
   final ConvertJob job;
   const _JobTile({required this.job});
 
+  /// What FFmpeg is reporting right now. Every figure here comes from
+  /// the encoder itself; nothing is shown that isn't known yet.
+  Widget _liveFigures(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final style = Theme.of(context)
+        .textTheme
+        .labelSmall
+        ?.copyWith(color: cs.onSurfaceVariant);
+    final items = <(IconData, String)>[
+      if (job.progress != null)
+        (Icons.percent, (job.progress! * 100).toStringAsFixed(0)),
+      if (job.etaSeconds != null)
+        (
+          Icons.schedule,
+          '${ConvertManager.formatDuration(job.etaSeconds!)} left'
+        ),
+      if (job.speed != null) (Icons.fast_forward, job.speed!),
+      if (job.bitrate != null) (Icons.equalizer, job.bitrate!),
+      if (job.outputBytes != null)
+        (Icons.save_outlined, PlatformUtil.humanBytes(job.outputBytes!)),
+      if (job.passes > 1) (Icons.repeat, 'pass ${job.pass}/${job.passes}'),
+    ];
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Wrap(
+        spacing: 14,
+        runSpacing: 2,
+        children: [
+          for (final (icon, text) in items)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(icon, size: 13, color: cs.outline),
+              const SizedBox(width: 3),
+              Text(text, style: style),
+            ]),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cm = context.read<ConvertManager>();
@@ -1555,16 +1825,26 @@ class _JobTile extends StatelessWidget {
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (job.status == JobStatus.running)
+            if (job.status == JobStatus.running) ...[
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 child: LinearProgressIndicator(
                     value: job.progress,
                     borderRadius: BorderRadius.circular(4)),
               ),
-            Text(job.statusLine, maxLines: 1, overflow: TextOverflow.ellipsis),
+              _liveFigures(context),
+            ],
+            Text(job.statusLine, maxLines: 2, overflow: TextOverflow.ellipsis),
+            if (job.sidecarFiles.isNotEmpty)
+              Text(
+                  'Subtitles: ${job.sidecarFiles.map(p.basename).join(', ')}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: Theme.of(context).colorScheme.tertiary)),
           ],
         ),
+
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [

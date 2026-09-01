@@ -40,6 +40,39 @@ class FormatOptionsPanel extends StatelessWidget {
     'aac_coder', 'joint_stereo', 'frame_duration', 'packet_loss',
   ];
 
+  /// The container options worth putting in front of people, per muxer.
+  /// Anything a build does not have is skipped, and everything else is
+  /// still there under "all other options".
+  static const _commonMuxer = <String, List<String>>{
+    'mp4': [
+      'movflags', 'brand', 'movie_timescale', 'video_track_timescale',
+      'frag_duration', 'min_frag_duration', 'write_prft', 'use_editlist',
+    ],
+    'mov': [
+      'movflags', 'brand', 'movie_timescale', 'video_track_timescale',
+      'write_tmcd', 'use_editlist',
+    ],
+    'ipod': ['movflags', 'brand', 'movie_timescale'],
+    'matroska': [
+      'default_mode', 'reserve_index_space', 'cues_to_front', 'live',
+      'write_crc32', 'cluster_time_limit', 'cluster_size_limit',
+    ],
+    'webm': [
+      'default_mode', 'dash', 'live', 'cues_to_front',
+      'cluster_time_limit', 'cluster_size_limit',
+    ],
+    'mpegts': [
+      'mpegts_flags', 'mpegts_service_type', 'mpegts_service_id', 'muxrate',
+      'pat_period', 'sdt_period', 'pcr_period', 'mpegts_m2ts_mode',
+    ],
+    'gif': ['loop', 'final_delay'],
+    'mp3': ['id3v2_version', 'write_xing', 'write_id3v1'],
+    'ogg': ['page_duration', 'pagesize', 'serial_offset'],
+    'wav': ['rf64', 'write_bext', 'write_peak'],
+    'flac': ['write_header'],
+    'avi': ['reserve_index_space', 'write_channel_mask'],
+  };
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -79,7 +112,7 @@ class FormatOptionsPanel extends StatelessWidget {
         title: '${target.label} container options',
         subtitle: 'muxer ${muxer.name}',
         caps: EncoderCaps(name: muxer.name, options: muxer.options),
-        common: const ['movflags', 'faststart', 'write_crc32', 'reserve_index_space'],
+        common: _commonMuxer[muxer.name] ?? const [],
         values: plan.muxerOptions,
         onSet: (name, value) {
           if (value == null) {

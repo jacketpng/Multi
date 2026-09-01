@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../models/tool.dart';
 import '../../services/tool_manager.dart';
+import '../widgets/multi_logo.dart';
 
 /// First-run screen: the app waits here while the media tools are
 /// fetched, so nothing can be used half-installed. It shows the logo,
@@ -27,8 +28,9 @@ class OnboardingPage extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Icon(Icons.all_inclusive, size: 64, color: cs.primary),
+                MultiLogo(size: 76, color: cs.primary, gap: cs.surface),
                 const SizedBox(height: 12),
+
                 Text('Multi',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.displaySmall?.copyWith(
@@ -39,7 +41,7 @@ class OnboardingPage extends StatelessWidget {
                       ? (tm.hasProblems
                           ? 'Setup finished, but some tools are unavailable.'
                           : 'Everything is ready.')
-                      : 'Getting the tools ready. This happens once.',
+                      : 'Updating tools.',
                   textAlign: TextAlign.center,
                   style: Theme.of(context)
                       .textTheme
@@ -53,15 +55,14 @@ class OnboardingPage extends StatelessWidget {
                   onPressed: done ? onContinue : null,
                   icon: Icon(done ? Icons.arrow_forward : Icons.hourglass_top),
                   label: Text(done
-                      ? 'Start using Multi'
+                      ? 'Launch app.'
                       : '${tm.readyCount} of ${ToolId.values.length} ready…'),
                 ),
                 if (done && tm.hasProblems)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(
-                      'Multi still works — the pages that need a missing tool '
-                      'will say so, and you can retry from Tools.',
+                      'Multi will still work, but with some features missing.',
                       textAlign: TextAlign.center,
                       style: Theme.of(context)
                           .textTheme

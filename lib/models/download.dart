@@ -23,7 +23,8 @@ extension PresetInfo on PresetId {
           'Parallel connections, no delays. Fastest, but easy to rate-limit.',
         PresetId.balanced => 'Sensible defaults for most sites.',
         PresetId.gentle =>
-          'Single connection, randomized delays, capped speed — looks like a person, not a bot.',
+          'Single connection, randomized delays, capped speed. For if you '
+          'don\'t want to look like a robot.',
       };
 }
 

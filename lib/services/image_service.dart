@@ -93,7 +93,7 @@ class ImageService extends ChangeNotifier {
 
     if (sameFormat && s.maxDimension == null && s.resizePercent == null &&
         !s.stripMetadata && s.extraArgs.trim().isEmpty) {
-      ops.add('Same format, no edits — file is simply re-saved');
+      ops.add('Same format, no edits. File is simply re-saved');
     } else if (sameFormat) {
       ops.add('Kept as ${fmt.label}');
     } else {
@@ -150,7 +150,7 @@ class ImageService extends ChangeNotifier {
       for (final i in items) {
         if (i.status == JobStatus.queued) {
           i.status = JobStatus.failed;
-          i.statusLine = 'ImageMagick is not installed yet — check the Tools page';
+          i.statusLine = 'ImageMagick is not installed yet. Check the Tools page';
         }
       }
       notifyListeners();

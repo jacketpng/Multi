@@ -9,6 +9,7 @@ import 'ui/pages/image_page.dart';
 import 'ui/pages/onboarding_page.dart';
 import 'ui/pages/settings_page.dart';
 import 'ui/pages/tools_page.dart';
+import 'ui/widgets/multi_logo.dart';
 
 /// Tells a page whether it is the one currently on screen. Needed
 /// because IndexedStack keeps every page mounted, and desktop_drop
@@ -111,9 +112,12 @@ class _ShellState extends State<_Shell> {
               padding: const EdgeInsets.symmetric(vertical: 12),
               child: Column(
                 children: [
-                  Icon(Icons.all_inclusive,
-                      size: 32,
-                      color: Theme.of(context).colorScheme.primary),
+                  MultiLogo(
+                    size: 34,
+                    color: Theme.of(context).colorScheme.primary,
+                    gap: Theme.of(context).colorScheme.surface,
+                  ),
+
                   const SizedBox(height: 4),
                   Text('Multi',
                       style: Theme.of(context)

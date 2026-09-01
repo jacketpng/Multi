@@ -242,8 +242,8 @@ class AudioCard extends StatelessWidget {
                   controlAffinity: ListTileControlAffinity.leading,
                   title: const Text('Variable bitrate'),
                   subtitle: Text(
-                      'Spends bits where the music needs them instead of '
-                      'holding one rate. ${vbr.help}',
+                      'Adjusts bitrate automatically to preserve audio '
+                      'quality and compression efficiency. ${vbr.help}',
                       style: Theme.of(context).textTheme.labelSmall),
                   value: st.audioVbr,
                   onChanged: (v) {
@@ -583,7 +583,7 @@ class _BlackBarsRowState extends State<BlackBarsRow> {
                     : const Icon(Icons.crop, size: 18),
                 label: Text(f.cropDetected
                     ? 'Check the black bars again'
-                    : 'Trim the letterbox off'),
+                    : 'Remove black bars'),
               ),
               if (_busy) ...[
                 const SizedBox(width: 12),

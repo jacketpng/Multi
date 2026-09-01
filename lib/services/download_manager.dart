@@ -182,8 +182,7 @@ class DownloadManager extends ChangeNotifier {
         options.cookieSource == CookieSource.none) {
       task.status = TaskStatus.needsCookies;
       task.statusLine =
-          '$host only shows content to logged-in visitors — choose cookies '
-          'before Multi looks at the page';
+          '$host only shows content to logged-in visitors — choose cookies before downloading';
       notifyListeners();
       return;
     }

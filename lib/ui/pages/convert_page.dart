@@ -208,7 +208,10 @@ class _ConvertPageState extends State<ConvertPage> {
         Text('Convert / Remux', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 4),
         Text(
-          '“I have this container, I want that container.” Multi copies every stream the target can hold and re-encodes only what it can’t — unless you choose otherwise below.',
+          'Fast and easy file converting. By default it will try to copy '
+          'streams from container to container. It will fall back to '
+          'transcoding when remuxing is impossible. Transcoding can be very '
+          'slow depending on your hardware.',
           style: Theme.of(context)
               .textTheme
               .bodySmall
@@ -223,7 +226,7 @@ class _ConvertPageState extends State<ConvertPage> {
               label: const Text('Choose a file'),
             ),
             const SizedBox(width: 10),
-            Text('or drop one anywhere on this page',
+            Text('or drop one here',
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
@@ -260,8 +263,7 @@ class _ConvertPageState extends State<ConvertPage> {
                 leading: const Icon(Icons.download_done, size: 20),
                 title: const Text('Just downloaded'),
                 subtitle: const Text(
-                    'Set up the conversion below, then press Convert. The '
-                    'downloaded original is deleted once it succeeds.'),
+                    'Configure your settings, then hit Convert. The original file will be deleted.'),
               ),
             ),
           ),
@@ -619,7 +621,7 @@ class _SizeSummary extends StatelessWidget {
         Flexible(
           child: Text(
             plan.isPureRemux
-                ? 'exact — nothing is re-encoded'
+                ? 'Perfect transfer. Nothing will be transcoded.'
                 : 'estimate: real size depends on the footage',
             textAlign: TextAlign.end,
             style: Theme.of(context)
@@ -861,8 +863,8 @@ class _StreamRow extends StatelessWidget {
       if (copyAllowed)
         (
           'copy',
-          'Copy — no re-encode',
-          'instant, bit-for-bit, no quality loss',
+          'Copy',
+          'Perfect copy. No transcode.',
           true
         ),
       for (final c in choices) (c.id, c.label, c.shortDescription, false),
@@ -992,11 +994,15 @@ class _TranscodeSettingsPanel extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             capped
-                ? 'A size cap sets the bitrate directly, so the rate mode is fixed.'
+                ? 'A size cap sets the bitrate directly, so the rate mode is '
+                  'fixed. This will get you a more predictible file size, '
+                  'but may not look very good for complex scenes.'
                 : !cqSupported
-                    ? '${family?.label ?? 'This encoder'} has no dependable constant-quality mode — it encodes to a bitrate.'
+                    ? "${family?.label ?? 'This encoder'} has no dependable "
+                      "constant-quality mode. It must adhere to a bitrate."
                     : st.mode == RateMode.constantQuality
-                        ? 'Recommended: quality stays constant, file size varies with content.'
+                        ? 'Recommended: quality is consistant throughout the '
+                          'video, but the file size can be unpredictable.'
                         : 'File size is predictable, quality varies with content.',
             style: Theme.of(context)
                 .textTheme
@@ -1032,7 +1038,7 @@ class _TranscodeSettingsPanel extends StatelessWidget {
                     },
                   ),
                 ),
-                Text('lower = better',
+                Text('lower = higher quality',
                     style: Theme.of(context)
                         .textTheme
                         .labelSmall
@@ -1051,7 +1057,7 @@ class _TranscodeSettingsPanel extends StatelessWidget {
                   }
                 },
                 icon: const Icon(Icons.straighten, size: 16),
-                label: const Text('Match the original file size'),
+                label: const Text('Try to match the original file size'),
               ),
             ),
           ],
@@ -1097,8 +1103,8 @@ class _TranscodeSettingsPanel extends StatelessWidget {
               title: const Text('Two-pass encoding'),
               subtitle: const Text(
                   'Encodes once to measure where the difficult parts are, '
-                  'then again to spend the bits there. Twice as slow, and '
-                  'it hits the target size far more accurately.'),
+                  'then again to spend the bits there. Twice as slow, but it '
+                  'hits the target size far more accurately.'),
               value: st.twoPass,
               onChanged: (v) {
                 st.twoPass = v ?? false;
@@ -1168,8 +1174,8 @@ class _SizeCapRow extends StatelessWidget {
             else
               Expanded(
                 child: Text(
-                  'Fit the result under a size limit — for Discord, email, '
-                  'or anywhere with an upload cap.',
+                  'Fit the result under a size limit. For Discord, email, or '
+                  'anywhere with an upload cap.',
                   style: Theme.of(context)
                       .textTheme
                       .labelSmall
@@ -1184,8 +1190,8 @@ class _SizeCapRow extends StatelessWidget {
             child: Text(
               !applies
                   ? 'The video is being copied, so its size is already '
-                      'fixed — pick a codec for the video stream above for '
-                      'the cap to do anything.'
+                    'fixed. Pick a codec other than copy for this to do '
+                    'anything.'
                   : bps == null
                       ? 'This clip has no known duration, so a size cap '
                           'cannot be worked out.'
@@ -1414,8 +1420,8 @@ class _FiltersSection extends StatelessWidget {
           type: 'video',
           explanation:
               'The video is being copied bit-for-bit, so nothing here can '
-              'reach it — a filter has to draw on frames, and a copy never '
-              'produces any.',
+              'touch it. If you want these filters to do anything, select a '
+              'codec other than copy.',
           onChanged: onChanged,
         ),
         Row(
@@ -1737,8 +1743,8 @@ class _OutputCard extends StatelessWidget {
               controlAffinity: ListTileControlAffinity.leading,
               title: const Text('Delete the original when it succeeds'),
               subtitle: Text(
-                  'Only after the new file is written — a failed conversion '
-                  'never removes anything.',
+                  'Only after the new file is written. If the convert fails '
+                  'the original won\'t be deleted.',
                   style: Theme.of(context)
                       .textTheme
                       .bodySmall

@@ -114,18 +114,9 @@ class _DownloadPageState extends State<DownloadPage> {
                 ),
               ),
               const Spacer(),
-              Text(
-                'Nothing downloads until you hit Start',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Theme.of(context).colorScheme.outline),
-              ),
-              if (dm.tasks.isNotEmpty) ...[
-                const SizedBox(width: 12),
+              if (dm.tasks.isNotEmpty)
                 FilledButton.tonalIcon(
-                  onPressed:
-                      dm.readyCount == 0 ? null : () => dm.startAll(),
+                  onPressed: dm.readyCount == 0 ? null : () => dm.startAll(),
                   icon: const Icon(Icons.download_done_outlined, size: 18),
                   label: Text(dm.readyCount == 0
                       ? 'Download all'
@@ -135,7 +126,7 @@ class _DownloadPageState extends State<DownloadPage> {
                     textStyle: Theme.of(context).textTheme.labelMedium,
                   ),
                 ),
-              ],
+
             ],
           ),
         ),
@@ -155,7 +146,7 @@ class _DownloadPageState extends State<DownloadPage> {
                           style: Theme.of(context).textTheme.titleMedium),
                       const SizedBox(height: 4),
                       Text(
-                        'Videos go to yt-dlp, galleries to gallery-dl,\neverything else to aria2 — automatically.',
+                        'Videos go to yt-dlp, galleries to gallery-dl,\neverything else to aria2.',
                         textAlign: TextAlign.center,
                         style: Theme.of(context)
                             .textTheme
@@ -293,7 +284,8 @@ class _TaskCardState extends State<_TaskCard> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      '$host usually needs log-in cookies — set them in Options to avoid errors and bot checks.',
+                      '$host usually needs to be logged in. Add your cookies '
+                      'in Options to avoid issues.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.tertiary),
                     ),
@@ -499,8 +491,7 @@ class _CookieGateState extends State<_CookieGate> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '$host hides content from logged-out visitors. Choose your '
-                  'cookies first — nothing has been requested from the site yet.',
+                  '$host hides content from logged-out users. Choose your cookies first.',
                   style: Theme.of(context)
                       .textTheme
                       .bodySmall
@@ -620,7 +611,7 @@ class _LibrewolfProfileFieldState extends State<LibrewolfProfileField> {
 
     if (!widget.browserSupported) {
       return Text(
-        'aria2 can\'t read browser cookies — export a cookie file instead.',
+        'aria2 can\'t read browser cookies. You must export a cookie file instead.',
         style: small?.copyWith(color: cs.outline),
       );
     }
@@ -984,7 +975,7 @@ class _PreviewSection extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                'After downloading, media files go straight to Convert (remux-first).',
+                'After downloading, media files go straight to Convert.',
                 style: Theme.of(context)
                     .textTheme
                     .bodySmall
@@ -1009,7 +1000,7 @@ class _FormatPresetButtons extends StatelessWidget {
     (
       'compat',
       'Compatible',
-      'H.264 video + AAC audio when available — plays on everything'
+      'H.264 video + AAC audio when available'
     ),
     ('audio', 'Audio only', 'Best audio track, no video'),
   ];
@@ -1813,7 +1804,7 @@ class _TaskOptionsDialogState extends State<TaskOptionsDialog> {
               initialValue: o.extraArgs,
               decoration: InputDecoration(
                 hintText:
-                    'Any other ${task.engine.displayName} flags, exactly as on the command line',
+                    'Any other ${task.engine.displayName} command line flags',
                 isDense: true,
                 border:
                     OutlineInputBorder(borderRadius: BorderRadius.circular(8)),

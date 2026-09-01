@@ -1,7 +1,7 @@
 name: multi
 description: "Multi — a media multi-tool. One GUI for yt-dlp, gallery-dl, aria2, FFmpeg, and ImageMagick. GPL-3.0-or-later."
 publish_to: 'none'
-version: 0.2.0
+version: 0.3.0
 
 environment:
   sdk: ^3.10.0

@@ -995,13 +995,13 @@ class _TranscodeSettingsPanel extends StatelessWidget {
           Text(
             capped
                 ? 'A size cap sets the bitrate directly, so the rate mode is '
-                  'fixed. This will get you a more predictible file size, '
+                  'fixed. This will get you a more predictable file size, '
                   'but may not look very good for complex scenes.'
                 : !cqSupported
                     ? "${family?.label ?? 'This encoder'} has no dependable "
                       "constant-quality mode. It must adhere to a bitrate."
                     : st.mode == RateMode.constantQuality
-                        ? 'Recommended: quality is consistant throughout the '
+                        ? 'Recommended: quality is consistent throughout the '
                           'video, but the file size can be unpredictable.'
                         : 'File size is predictable, quality varies with content.',
             style: Theme.of(context)

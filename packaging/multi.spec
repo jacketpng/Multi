@@ -5,7 +5,7 @@
 %global appid dev.multi.Multi
 # build-rpm.sh passes the version from pubspec.yaml, so the two cannot
 # drift apart; the literal is only a fallback for a manual rpmbuild.
-%global appversion %{?_version}%{!?_version:0.2.0}
+%global appversion %{?_version}%{!?_version:0.3.0}
 
 Name:           multi
 Version:        %{appversion}
@@ -94,6 +94,15 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/%{appid}.desktop
 %{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
 
 %changelog
+* Tue Sep 01 2026 Matt Vasquez <mattjack.vasquez@gmail.com> - 0.3.0-1
+- Subtitles: burn-in, sidecar extraction, format conversion
+- Audio: sample rate, channels, VBR, EBU R128 and peak normalisation
+- Black bar removal measured with cropdetect across the whole file
+- Two-pass encoding, per-stream metadata, stream reordering
+- GIF now builds a palette from the clip instead of the fixed web one
+- Audio and subtitle tracks can be filtered by language
+- Download all, and a paste of several links becomes one task each
+- New icon
 * Sun Aug 30 2026 Matt Vasquez <mattjack.vasquez@gmail.com> - 0.2.0-1
 - Settings page for saved defaults
 - Hardware encoding on by default when the machine supports it
